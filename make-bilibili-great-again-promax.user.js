@@ -1,11 +1,11 @@
 // ==UserScript==
 // @name         Make BiliBili Great Again ProMax
-// @namespace    https://www.kookxiang.com/
+// @namespace    
 // @version      3.1.2
 // @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/make-bilibili-great-again-promax.user.js
 // @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/make-bilibili-great-again-promax.user.js
 // @description  Bilibili 体验优化，去广告，URL 清理，P2P CDN 控制，直播优化，文章复制修复
-// @author       MBGA ProMax
+// @author       素晴
 // @match        https://*.bilibili.com/*
 // @run-at       document-start
 // @grant        unsafeWindow

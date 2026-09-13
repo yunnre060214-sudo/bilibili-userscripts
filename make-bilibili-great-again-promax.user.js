@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Make BiliBili Great Again ProMax
 // @namespace    https://www.kookxiang.com/
-// @version      3.1.1
+// @version      3.1.2
 // @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/make-bilibili-great-again-promax.user.js
 // @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/make-bilibili-great-again-promax.user.js
 // @description  Bilibili 体验优化，去广告，URL 清理，P2P CDN 控制，直播优化，文章复制修复
@@ -750,7 +750,7 @@
                 return Promise.reject(new DOMException(reason || 'Blocked by MBGA', 'AbortError'));
             }
 
-            return Promise.resolve(new Response('', {
+            return Promise.resolve(new Response(null, {
                 status: 204,
                 statusText: 'No Content'
             }));
@@ -814,6 +814,8 @@
 
             HookManager.method('NetworkManager', proto, 'open', (originalOpen) => {
                 return function (method, url, ...rest) {
+                    // An XMLHttpRequest can be reopened after an intercepted request.
+                    delete this.__MBGA_BLOCKED__;
                     const originalUrl = typeof url === 'string' ? url : String(url || '');
                     const action = NetworkManager.applyRules(originalUrl, {
                         type: 'xhr',

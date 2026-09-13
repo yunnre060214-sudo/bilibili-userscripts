@@ -2,7 +2,7 @@
 // @name         Bilibili Comment Thread Exporter
 // @name:zh-CN   B站评论楼层导出器
 // @namespace    https://codex.local/bilibili-comment-thread-exporter
-// @version      0.4.2
+// @version      0.4.3
 // @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/bilibili-comment-thread-exporter.user.js
 // @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/bilibili-comment-thread-exporter.user.js
 // @description  Add lightweight page controls to export one Bilibili comment thread as Markdown or JSON.
@@ -20,7 +20,7 @@
   "use strict";
 
   const SCRIPT_ID = "bce-thread-exporter";
-  const VERSION = "0.4.1";
+  const VERSION = "0.4.3";
   const COMMENT_TYPE_VIDEO = 1;
   const REPLY_PAGE_SIZE = 20;
   const MAX_REPLY_PAGES = 250;
@@ -90,16 +90,14 @@
 
     pageWindow.fetch = function patchedFetch(input, init) {
       const url = getRequestUrl(input);
-      return originalFetch.apply(this, arguments).then((response) => {
-        if (looksLikeCommentApi(url) && response && typeof response.clone === "function") {
-          response
-            .clone()
-            .json()
-            .then((payload) => ingestCommentPayload(payload, url))
-            .catch(() => {});
-        }
-        return response;
-      });
+      const promise = originalFetch.apply(this, arguments);
+      if (looksLikeCommentApi(url)) {
+        // Keep observation failures separate from the page's original request.
+        promise.then((response) => response.clone().json())
+          .then((payload) => ingestCommentPayload(payload, url))
+          .catch(() => {});
+      }
+      return promise;
     };
   }
 
@@ -118,14 +116,16 @@
     Xhr.prototype.open.__bcePatched = true;
 
     Xhr.prototype.send = function patchedSend() {
-      if (looksLikeCommentApi(this.__bceUrl)) {
+      if (!this.__bceWatched) {
+        this.__bceWatched = true;
         this.addEventListener("load", () => {
-          const text = this.responseText;
-          if (!text || typeof text !== "string") return;
+          if (!looksLikeCommentApi(this.__bceUrl)) return;
           try {
-            ingestCommentPayload(JSON.parse(text), this.__bceUrl);
+            const payload = this.responseType === "json" ? this.response
+              : (!this.responseType || this.responseType === "text") ? JSON.parse(this.responseText) : null;
+            if (payload) ingestCommentPayload(payload, this.__bceUrl);
           } catch (_) {
-            // Ignore non-JSON or partial responses.
+            // Ignore non-JSON, binary, or inaccessible responses.
           }
         });
       }
@@ -142,7 +142,12 @@
   }
 
   function looksLikeCommentApi(url) {
-    return /api\.bilibili\.com\/x\/v2\/reply/.test(String(url || ""));
+    try {
+      const parsed = new URL(String(url || ""), location.href);
+      return parsed.hostname === "api.bilibili.com" && /^\/x\/v2\/reply(?:\/|$)/.test(parsed.pathname);
+    } catch (_) {
+      return false;
+    }
   }
 
   function ingestCommentPayload(payload, sourceUrl) {
@@ -224,7 +229,12 @@
   }
 
   function observePage() {
-    const observer = new MutationObserver(() => {
+    const observer = new MutationObserver((mutations) => {
+      const hasPageChange = mutations.some(({ target }) => {
+        const element = target.nodeType === 1 ? target : target.parentElement;
+        return !element?.closest?.(`#${SCRIPT_ID}-shell`);
+      });
+      if (!hasPageChange) return;
       scheduleScan(600);
       updateShellVisibility();
     });
@@ -243,8 +253,11 @@
   }
 
   function scheduleScan(delay) {
-    clearTimeout(state.scanTimer);
-    state.scanTimer = window.setTimeout(scanPageForCommentTargets, delay);
+    if (state.scanTimer) return;
+    state.scanTimer = window.setTimeout(() => {
+      state.scanTimer = 0;
+      scanPageForCommentTargets();
+    }, delay);
   }
 
   function scheduleRender(delay) {
@@ -811,6 +824,7 @@
     const selectedReplyId = options?.selectedReplyId ? String(options.selectedReplyId) : "";
     const progress = options?.progress;
     const allReplies = [];
+    const seenReplyIds = new Set();
     let rootReply = state.roots.get(root) || null;
     let total = 0;
     let truncated = false;
@@ -837,13 +851,26 @@
 
       const replies = Array.isArray(data.replies) ? data.replies : [];
       for (const reply of replies) traverseReply(reply, url);
-      allReplies.push(...replies);
-      total = Number(data.page?.count || total || replies.length || 0);
+      const previousCount = allReplies.length;
+      for (const reply of replies) {
+        const id = getReplyId(reply);
+        if (!id || seenReplyIds.has(id)) continue;
+        seenReplyIds.add(id);
+        allReplies.push(reply);
+      }
+      const reportedTotal = Number(data.page?.count);
+      if (Number.isFinite(reportedTotal) && reportedTotal >= 0) total = reportedTotal;
       progress?.(allReplies.length, total);
 
-      if (replies.length === 0) break;
+      if (replies.length === 0) {
+        truncated = total > allReplies.length;
+        break;
+      }
       if (total > 0 && allReplies.length >= total) break;
-      if (pn === MAX_REPLY_PAGES) truncated = true;
+      if (allReplies.length === previousCount || pn === MAX_REPLY_PAGES) {
+        truncated = true;
+        break;
+      }
       await delay(REQUEST_DELAY_MS);
     }
 
@@ -1036,7 +1063,7 @@
     lines.push(`- 选中评论 rpid：${thread.source.selectedRpid || thread.source.rootRpid}`);
     lines.push(`- 导出时间：${formatTime(Date.now() / 1000)}`);
     if (thread.exporter.truncated) {
-      lines.push(`- 注意：达到脚本上限，只导出了前 ${thread.exporter.maxPages * thread.exporter.pageSize} 条回复`);
+      lines.push(`- 注意：导出可能不完整（分页提前结束、重复或达到上限），已获取 ${replies.length} 条不重复回复`);
     }
 
     if (thread.selected && thread.selected.rpid !== root.rpid) {

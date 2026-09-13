@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         哔哩发评反诈 Pro
 // @namespace    https://chatgpt.com/user-scripts/bili-comment-anti-fraud-Pro
-// @version      4.2.2
+// @version      4.2.3
 // @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/bilibili-comment-anti-fraud-pro.user.js
 // @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/bilibili-comment-anti-fraud-pro.user.js
 // @description  B站评论发送后自动检查无账号可见性：正常、疑似仅自己可见、疑似秒删、可疑状态。风控响应会自动降级，不误判评论状态。支持设置、取消队列、透明报告和无限次重新检测。无 AI、无 API Key。
@@ -1051,28 +1051,37 @@
   }
 
   async function requestJson(url, { login = false, token } = {}) {
+    checkCancelled(token);
     const errors = [];
     let riskControlResponse = null;
 
     try {
       const json = await requestJsonByFetch(url, { login });
+      checkCancelled(token);
       if (!isRiskControlResponse(json)) return json;
       riskControlResponse = json;
     } catch (error) {
+      checkCancelled(token);
+      if (isCancelledError(error)) throw error;
       recordRequestAttempt({ mode: login ? '页面 fetch 登录态' : '页面 fetch 游客', login, ok: false, url, error: error.message });
       errors.push(`页面 fetch ${login ? '登录' : '游客'}请求失败：${error.message}`);
     }
 
+    checkCancelled(token);
     if (!login && canUseGmXhr()) {
       if (riskControlResponse) {
         await sleepWithCancel(RISK_CONTROL_RETRY_DELAY_MS, token);
       }
 
       try {
+        checkCancelled(token);
         const json = await requestJsonByGm(url);
+        checkCancelled(token);
         if (!isRiskControlResponse(json)) return json;
         riskControlResponse = json;
       } catch (error) {
+        checkCancelled(token);
+        if (isCancelledError(error)) throw error;
         recordRequestAttempt({ mode: 'GM 匿名回退', login: false, ok: false, url, error: error.message });
         errors.push(`GM 匿名回退请求失败：${error.message}`);
       }
@@ -1639,14 +1648,15 @@
 
     XHR.prototype.send = function patchedSend(...args) {
       const xhr = this;
-      const url = xhr.__bfcLiteUrl || '';
-
-      if (isAddCommentEndpoint(url) && !xhr.__bfcLiteWatched) {
+      if (!xhr.__bfcLiteWatched) {
         xhr.__bfcLiteWatched = true;
         xhr.addEventListener('load', () => {
+          const responseUrl = xhr.__bfcLiteUrl || '';
+          if (!isAddCommentEndpoint(responseUrl)) return;
           try {
-            const text = typeof xhr.responseText === 'string' ? xhr.responseText : String(xhr.response || '');
-            observeAddCommentResponse(url, text);
+            const text = xhr.responseType === 'json' ? JSON.stringify(xhr.response)
+              : (!xhr.responseType || xhr.responseType === 'text') ? xhr.responseText : '';
+            if (text) observeAddCommentResponse(responseUrl, text);
           } catch (error) {
             warn('读取发评 XHR 响应失败', error);
           }

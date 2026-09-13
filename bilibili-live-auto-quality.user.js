@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站直播 自动最高/最低画质（前台最高 后台最低）
 // @namespace    http://tampermonkey.net/
-// @version      2.4.1
+// @version      2.4.2
 // @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/bilibili-live-auto-quality.user.js
 // @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/bilibili-live-auto-quality.user.js
 // @match        https://live.bilibili.com/*
@@ -57,6 +57,7 @@
 
     let ready = false;
     let switching = false;
+    let pendingSelection = null;
     let lastAction = null;
     let lastActionTime = 0;
     let initAttempts = 0;
@@ -222,7 +223,11 @@
 
     function selectQuality(mode, refreshAfterSwitch) {
         ensureInit();
-        if (!ready || switching || shouldSkip(mode)) return;
+        if (switching) {
+            pendingSelection = { mode, refreshAfterSwitch };
+            return;
+        }
+        if (!ready || shouldSkip(mode)) return;
 
         const currentOperation = ++operationId;
         switching = true;
@@ -236,6 +241,12 @@
 
         waitForItems((items) => {
             if (currentOperation !== operationId) return;
+            if (pendingSelection) {
+                mode = pendingSelection.mode;
+                refreshAfterSwitch = pendingSelection.refreshAfterSwitch;
+                pendingSelection = null;
+                markAction(mode);
+            }
 
             const target = mode === 'low' ? getLowestItem(items) : getHighestItem(items);
             if (target) {
@@ -245,7 +256,7 @@
                 warn('未找到可选画质');
             }
 
-            if (refreshAfterSwitch) {
+            if (target && refreshAfterSwitch) {
                 setTimeout(() => {
                     if (currentOperation === operationId) clickPlayerRefresh();
                 }, 300);

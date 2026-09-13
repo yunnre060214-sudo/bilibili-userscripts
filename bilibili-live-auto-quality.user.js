@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         B站直播 自动最高/最低画质（前台最高 后台最低）
-// @namespace    http://tampermonkey.net/
+// @namespace    https://space.bilibili.com/1937432404
 // @version      2.4.2
 // @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/bilibili-live-auto-quality.user.js
 // @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/bilibili-live-auto-quality.user.js
 // @match        https://live.bilibili.com/*
 // @grant        none
+// @author       素晴
 // ==/UserScript==
 
 (function () {

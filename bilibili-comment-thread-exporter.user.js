@@ -1,13 +1,13 @@
 // ==UserScript==
 // @name         Bilibili Comment Thread Exporter
 // @name:zh-CN   B站评论楼层导出器
-// @namespace    https://codex.local/bilibili-comment-thread-exporter
+// @namespace    https://space.bilibili.com/1937432404
 // @version      0.4.3
 // @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/bilibili-comment-thread-exporter.user.js
 // @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/bilibili-comment-thread-exporter.user.js
 // @description  Add lightweight page controls to export one Bilibili comment thread as Markdown or JSON.
 // @description:zh-CN 给 B 站评论区增加“导出本楼”和右下角面板，把指定楼层整理成 Markdown 或 JSON。
-// @author       Codex
+// @author       素晴
 // @match        https://www.bilibili.com/video/*
 // @connect      api.bilibili.com
 // @grant        GM_xmlhttpRequest

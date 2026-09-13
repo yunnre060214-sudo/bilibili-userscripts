@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         Make BiliBili Great Again ProMax
-// @namespace    
+// @namespace    https://space.bilibili.com/1937432404
 // @version      3.1.2
 // @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/make-bilibili-great-again-promax.user.js
 // @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/make-bilibili-great-again-promax.user.js

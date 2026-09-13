@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         哔哩发评反诈 Pro
-// @namespace    https://chatgpt.com/user-scripts/bili-comment-anti-fraud-Pro
+// @namespace    https://space.bilibili.com/1937432404
 // @version      4.2.3
 // @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/bilibili-comment-anti-fraud-pro.user.js
 // @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/bilibili-comment-anti-fraud-pro.user.js

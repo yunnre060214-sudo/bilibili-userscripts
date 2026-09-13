@@ -420,8 +420,15 @@
   function ensureUi() {
     if (STATE.uiReady) return Promise.resolve();
 
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       const mount = () => {
+        try {
+          mountUi();
+        } catch (error) {
+          reject(error);
+        }
+      };
+      const mountUi = () => {
         if (STATE.uiReady) {
           resolve();
           return;
@@ -880,30 +887,45 @@
 
   async function copyText(text) {
     if (!text) return;
+    let copied = false;
 
     try {
       if (typeof GM_setClipboard === 'function') {
-        GM_setClipboard(text, 'text');
-        await UI.status('报告已复制。');
-        return;
+        copied = (await GM_setClipboard(text, 'text')) !== false;
       }
     } catch {
       // fallback below
     }
 
+    if (!copied) {
+      try {
+        copied = (await navigator.clipboard.writeText(text)) !== false;
+      } catch {
+        // fallback below
+      }
+    }
+
+    if (!copied) {
+      let area;
+      try {
+        area = document.createElement('textarea');
+        area.value = text;
+        area.style.position = 'fixed';
+        area.style.opacity = '0';
+        document.body.appendChild(area);
+        area.select();
+        copied = document.execCommand('copy') === true;
+      } catch (error) {
+        warn('复制失败', error);
+      } finally {
+        if (area) area.remove();
+      }
+    }
+
     try {
-      await navigator.clipboard.writeText(text);
-      await UI.status('报告已复制。');
-    } catch {
-      const area = document.createElement('textarea');
-      area.value = text;
-      area.style.position = 'fixed';
-      area.style.opacity = '0';
-      document.body.appendChild(area);
-      area.select();
-      document.execCommand('copy');
-      area.remove();
-      await UI.status('报告已复制。');
+      await UI.status(copied ? '报告已复制。' : '自动复制失败，请手动选择并复制报告内容。');
+    } catch (error) {
+      warn('复制提示失败', error);
     }
   }
 
@@ -1208,7 +1230,7 @@
   }
 
   function shouldConfirmResult(result) {
-    return result && result.kind !== 'ok' && result.kind !== 'unavailable';
+    return result && result.kind !== 'ok' && result.kind !== 'unavailable' && result.kind !== 'scan_limit';
   }
 
   function makeRiskControlUnavailableResult(steps) {
@@ -1236,6 +1258,7 @@
     }
 
     let latestResult = initialResult;
+    const resultKinds = [initialResult.kind];
     const retryCheckDelaysMs = getRetryCheckDelaysMs();
 
     for (let index = 0; index < retryCheckDelaysMs.length; index += 1) {
@@ -1255,6 +1278,7 @@
       steps.push(`第 ${index + 1} 次延迟复检。`);
       if (STATE.diagnostics) STATE.diagnostics.retries += 1;
       latestResult = await runVisibilityProbe(reply, steps, token);
+      resultKinds.push(latestResult.kind);
 
       if (latestResult.kind === 'ok') {
         return {
@@ -1265,12 +1289,19 @@
       }
     }
 
+    const stable = retryCheckDelaysMs.length > 0
+      && shouldConfirmResult(latestResult)
+      && resultKinds.every((kind) => kind === initialResult.kind);
+    let retrySummary = '本次未执行延迟复检，只报告即时检测结果。';
+    if (retryCheckDelaysMs.length > 0) {
+      retrySummary = stable
+        ? `已完成 ${retryCheckDelaysMs.length} 次延迟复检，结论保持一致；仍为疑似判断。`
+        : `已完成 ${retryCheckDelaysMs.length} 次延迟复检，结论发生变化，最新结论为“${latestResult.title}”，不能视为原结论已确认。`;
+    }
     return {
       ...latestResult,
-      confirmedAfterRetry: true,
-      extra: retryCheckDelaysMs.length > 0
-        ? `异常或可疑状态已经过 ${retryCheckDelaysMs.length} 次延迟复检确认。`
-        : '自动延迟复检已关闭，本次只报告即时检测结果。',
+      confirmedAfterRetry: stable,
+      extra: [latestResult.extra, retrySummary].filter(Boolean).join('\n\n'),
     };
   }
 
@@ -1425,6 +1456,16 @@
 
     if (login.unavailable) return makeRiskControlUnavailableResult(steps);
 
+    if (!anonymous.deleted && !login.deleted && (anonymous.reachedLimit || login.reachedLimit)) {
+      steps.push('扫描达到页数上限，未覆盖全部回复，不能据此判断删除。');
+      return {
+        kind: 'scan_limit',
+        title: '扫描范围不足，暂无法判断',
+        status: '回复扫描达到设置的页数上限，尚未找到目标评论。\n\n本次无法判断评论是否被删除；可调整楼中楼页数后重新检测。',
+        tone: 'info',
+      };
+    }
+
     return {
       kind: 'deleted',
       title: '评论疑似秒删',
@@ -1488,8 +1529,11 @@
     }
 
     STATE.queue.push({ reply, waitFirst });
-    updateActionButtons();
-    runQueue();
+    try {
+      updateActionButtons();
+    } finally {
+      runQueue();
+    }
   }
 
   function recheckLastReply() {
@@ -1530,32 +1574,49 @@
   async function runQueue() {
     if (STATE.running) return;
     STATE.running = true;
-    updateActionButtons();
-
-    while (STATE.queue.length > 0) {
-      const task = STATE.queue.shift();
-      const token = createCancelToken();
-      STATE.activeToken = token;
-      updateActionButtons();
-      try {
-        await detectCommentVisibility(task.reply, { waitFirst: task.waitFirst, token });
-      } catch (error) {
-        if (isCancelledError(error)) {
-          log('检测已取消');
-          break;
+    try {
+      while (STATE.queue.length > 0) {
+        const task = STATE.queue.shift();
+        const token = createCancelToken();
+        STATE.activeToken = token;
+        try {
+          updateActionButtons();
+          await detectCommentVisibility(task.reply, { waitFirst: task.waitFirst, token });
+        } catch (error) {
+          if (isCancelledError(error)) {
+            log('检测已取消');
+            break;
+          }
+          warn('检测失败', error);
+          if (STATE.diagnostics) {
+            STATE.diagnostics.finishedAt = now();
+            STATE.diagnostics.finalKind = 'error';
+          }
+          try {
+            await showError(error, getCommentText(task.reply));
+          } catch (uiError) {
+            warn('错误提示失败', uiError);
+          }
+        } finally {
+          STATE.activeToken = null;
         }
-        warn('检测失败', error);
-        if (STATE.diagnostics) {
-          STATE.diagnostics.finishedAt = now();
-          STATE.diagnostics.finalKind = 'error';
-        }
-        await showError(error, getCommentText(task.reply));
       }
+    } finally {
+      STATE.activeToken = null;
+      STATE.running = false;
+      try {
+        UI.indeterminate(false);
+      } catch (error) {
+        warn('进度状态清理失败', error);
+      }
+      try {
+        updateActionButtons();
+      } catch (error) {
+        warn('按钮状态刷新失败', error);
+      }
+      // 取消后新收到的评论使用新 token，不能滞留在旧队列循环之外。
+      if (STATE.queue.length > 0) runQueue();
     }
-
-    STATE.activeToken = null;
-    STATE.running = false;
-    updateActionButtons();
   }
 
   function handleAddCommentJson(json) {

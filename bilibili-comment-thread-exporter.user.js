@@ -2,7 +2,7 @@
 // @name         Bilibili Comment Thread Exporter
 // @name:zh-CN   B站评论楼层导出器
 // @namespace    https://space.bilibili.com/1937432404
-// @version      0.5.0
+// @version      0.5.1
 // @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/bilibili-comment-thread-exporter.user.js
 // @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/bilibili-comment-thread-exporter.user.js
 // @description  Add lightweight page controls to export one Bilibili comment thread as Markdown or JSON.
@@ -20,7 +20,7 @@
   "use strict";
 
   const SCRIPT_ID = "bce-thread-exporter";
-  const VERSION = "0.5.0";
+  const VERSION = "0.5.1";
   const COMMENT_TYPE_VIDEO = 1;
   const REPLY_PAGE_SIZE = 20;
   const MAX_REPLY_PAGES = 250;
@@ -784,6 +784,8 @@
 
   function bindExportButton(element, rootId) {
     const id = String(rootId || "");
+    const tag = String(element?.tagName || "").toLowerCase();
+    if (tag === "bili-comment-thread-renderer") return;
     if (!id || !element || element.dataset?.bceExportRoot === id) return;
     if (element.querySelector && element.querySelector(`.bce-inline-btn[data-root-id="${cssEscape(id)}"]`)) return;
 
@@ -815,23 +817,25 @@
 
   function handleCommentMenuPointerDown(event) {
     const path = typeof event.composedPath === "function" ? event.composedPath() : [event.target];
-    const trigger = path.find((node) => node?.nodeType === Node.ELEMENT_NODE && isCommentMoreTrigger(node));
+    const trigger = path.find((node) => node?.nodeType === 1 && isCommentMoreTrigger(node));
     if (!trigger) return;
 
-    const commentElement = findCommentElementInPath(path, trigger);
-    const context = resolveCommentExportContext(commentElement);
+    const actionRenderer = findCommentActionRendererInPath(path);
+    const contextElement = actionRenderer || findCommentElementInPath(path, trigger);
+    const context = resolveCommentExportContext(contextElement);
     if (!context?.rootId) return;
 
     state.menuTarget = {
       rootId: context.rootId,
       selectedReplyId: context.selectedReplyId || context.rootId,
       capturedAt: Date.now(),
+      actionRenderer,
+      menuHost: findBiliCommentMenuHost(path, actionRenderer),
     };
 
-    scheduleMenuInjection(0);
-    scheduleMenuInjection(80);
-    scheduleMenuInjection(220);
-    scheduleMenuInjection(600);
+    for (const delay of [0, 30, 80, 160, 300, 600, 1000]) {
+      scheduleMenuInjection(delay);
+    }
   }
 
   function isCommentMoreTrigger(element) {
@@ -843,17 +847,40 @@
       element.getAttribute?.("aria-label"),
       element.getAttribute?.("title"),
       element.getAttribute?.("data-title"),
+      element.getAttribute?.("icon"),
     ].filter(Boolean).join(" ").toLowerCase();
     const text = normalizeForMatch(element.textContent || "").slice(0, 30);
-    return /(?:more|ellipsis|three[-_ ]?dot|operation[-_ ]?more|menu[-_ ]?button)/i.test(hint) ||
+    return /(?:more|more_vertical|ellipsis|three[-_ ]?dot|operation[-_ ]?more|menu[-_ ]?button)/i.test(hint) ||
       /^(?:更多|more)$/i.test(text);
+  }
+
+  function findCommentActionRendererInPath(path) {
+    return path.find((node) =>
+      String(node?.tagName || "").toLowerCase() === "bili-comment-action-buttons-renderer"
+    ) || null;
+  }
+
+  function findBiliCommentMenuHost(path, actionRenderer) {
+    const moreContainer = path.find((node) =>
+      node?.nodeType === 1 &&
+      String(node.id || "").toLowerCase() === "more" &&
+      typeof node.querySelector === "function"
+    );
+    return moreContainer?.querySelector?.("bili-comment-menu") ||
+      actionRenderer?.shadowRoot?.querySelector?.("#more > bili-comment-menu, bili-comment-menu") ||
+      null;
   }
 
   function findCommentElementInPath(path, trigger) {
     const isCommentElement = (node) => {
-      if (!node || node.nodeType !== Node.ELEMENT_NODE) return false;
+      if (!node || node.nodeType !== 1) return false;
       const tag = String(node.tagName || "").toLowerCase();
-      if (["bili-comment-thread-renderer", "bili-comment-renderer", "bili-comment-reply-renderer"].includes(tag)) return true;
+      if ([
+        "bili-comment-action-buttons-renderer",
+        "bili-comment-thread-renderer",
+        "bili-comment-renderer",
+        "bili-comment-reply-renderer",
+      ].includes(tag)) return true;
       const className = String(node.className || "").toLowerCase();
       return Boolean(
         pickReplyIdFromAttributes(node) ||
@@ -877,13 +904,16 @@
     if (!element) return null;
 
     const dataReply = getReplyDataFromElement(element);
-    if (dataReply) storeSeenReply(dataReply, "dom:menu");
+    if (dataReply) {
+      storeSeenReply(dataReply, "dom:menu");
+      if (isRootReply(dataReply)) storeRootReply(dataReply, "dom:menu");
+    }
 
     const selectedReplyId = getReplyId(dataReply) || findReplyIdInElement(element);
     if (!selectedReplyId) return null;
 
     const indexed = dataReply || state.replyIndex.get(selectedReplyId);
-    let rootId = indexed?.root == null ? "" : String(indexed.root);
+    let rootId = indexed?.root_str || (indexed?.root == null ? "" : String(indexed.root));
     if (!rootId || rootId === "0") rootId = selectedReplyId;
 
     if (state.roots.has(selectedReplyId)) rootId = selectedReplyId;
@@ -895,7 +925,7 @@
     );
     if (directRoot) rootId = directRoot;
 
-    return { rootId, selectedReplyId };
+    return { rootId: String(rootId), selectedReplyId: String(selectedReplyId) };
   }
 
   function scheduleMenuInjection(delay) {
@@ -906,49 +936,130 @@
     const context = state.menuTarget;
     if (!context || Date.now() - context.capturedAt > 8000) return;
 
+    if ((!context.menuHost || !context.menuHost.isConnected) && context.actionRenderer?.shadowRoot) {
+      context.menuHost = context.actionRenderer.shadowRoot.querySelector(
+        "#more > bili-comment-menu, bili-comment-menu"
+      );
+    }
+
+    if (context.menuHost && injectIntoBiliCommentMenu(context.menuHost, context)) return;
+
     const menu = findBestOpenCommentMenu();
     if (!menu) return;
+    injectMenuItemIntoContainer(menu, context, null);
+  }
+
+  function injectIntoBiliCommentMenu(menuHost, context) {
+    const root = menuHost?.shadowRoot;
+    if (!root) return false;
 
     const key = `${context.rootId}:${context.selectedReplyId}`;
-    if (menu.dataset?.bceExportFor === key || menu.querySelector?.(".bce-menu-export-item")) return;
+    const existing = root.querySelector(".bce-menu-export-item");
+    if (existing) {
+      if (existing.dataset?.bceExportFor === key) return true;
+      existing.remove();
+    }
 
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "bce-menu-export-item";
-    button.textContent = "导出本楼";
-    button.title = "复制本楼 Markdown；按住 Alt/Option 点击下载 JSON";
-    button.style.cssText = [
-      "display:flex",
-      "align-items:center",
-      "width:100%",
-      "box-sizing:border-box",
-      "border:0",
-      "background:transparent",
-      "color:inherit",
-      "font:inherit",
-      "line-height:1.5",
-      "padding:8px 12px",
-      "text-align:left",
-      "cursor:pointer",
-    ].join(";");
+    const template = findNativeCommentMenuItem(root);
+    if (!template?.parentElement) return false;
 
-    button.addEventListener("mouseenter", () => {
-      button.style.background = "rgba(0, 0, 0, 0.06)";
-    });
-    button.addEventListener("mouseleave", () => {
-      button.style.background = "transparent";
-    });
-    button.addEventListener("click", (event) => {
+    return injectMenuItemIntoContainer(template.parentElement, context, template);
+  }
+
+  function findNativeCommentMenuItem(root) {
+    const actionText = /^(?:举报|删除|置顶|取消置顶|拉黑|取消拉黑|屏蔽|取消屏蔽|复制链接|复制)$/;
+    const nodes = Array.from(root.querySelectorAll(
+      'button, a, li, [role="menuitem"], [class*="item"], [class*="Item"], div, span'
+    ));
+
+    let best = null;
+    let bestScore = -1;
+    for (const node of nodes) {
+      const text = normalizeForMatch(node.textContent || "");
+      if (!actionText.test(text)) continue;
+
+      const tag = String(node.tagName || "").toLowerCase();
+      const hint = `${node.id || ""} ${typeof node.className === "string" ? node.className : ""}`.toLowerCase();
+      let score = 0;
+      if (["button", "a", "li"].includes(tag)) score += 60;
+      if (node.getAttribute?.("role") === "menuitem") score += 60;
+      if (/(?:^|[-_ ])(?:item|option|entry|action)(?:$|[-_ ])/i.test(hint)) score += 45;
+
+      const siblings = Array.from(node.parentElement?.children || []);
+      const nativeSiblingCount = siblings.filter((sibling) =>
+        actionText.test(normalizeForMatch(sibling.textContent || ""))
+      ).length;
+      if (nativeSiblingCount >= 2) score += 35;
+
+      if (score > bestScore) {
+        best = node;
+        bestScore = score;
+      }
+    }
+
+    return best;
+  }
+
+  function injectMenuItemIntoContainer(container, context, template) {
+    if (!container) return false;
+
+    const key = `${context.rootId}:${context.selectedReplyId}`;
+    const old = container.querySelector?.(".bce-menu-export-item");
+    if (old) {
+      if (old.dataset?.bceExportFor === key) return true;
+      old.remove();
+    }
+
+    let item;
+    if (template) {
+      item = template.cloneNode(false);
+      item.removeAttribute?.("id");
+      item.removeAttribute?.("href");
+      item.removeAttribute?.("target");
+    } else {
+      item = document.createElement("button");
+      item.type = "button";
+      item.style.cssText = [
+        "display:flex",
+        "align-items:center",
+        "width:100%",
+        "box-sizing:border-box",
+        "border:0",
+        "background:transparent",
+        "color:inherit",
+        "font:inherit",
+        "line-height:1.5",
+        "padding:8px 12px",
+        "text-align:left",
+        "cursor:pointer",
+      ].join(";");
+    }
+
+    if (String(item.tagName || "").toLowerCase() === "button") item.type = "button";
+    item.classList?.add("bce-menu-export-item");
+    if (item.dataset) item.dataset.bceExportFor = key;
+    item.textContent = "导出本楼";
+    item.title = "复制本楼 Markdown；按住 Alt/Option 点击下载 JSON";
+    item.style.cursor = "pointer";
+
+    const stopNativeAction = (event) => {
+      event.stopPropagation();
+      event.stopImmediatePropagation?.();
+    };
+    item.addEventListener("pointerdown", stopNativeAction);
+    item.addEventListener("mousedown", stopNativeAction);
+    item.addEventListener("click", (event) => {
       event.preventDefault();
+      stopNativeAction(event);
       exportRoot(context.rootId, {
         format: event.altKey ? "json" : "markdown",
-        sourceButton: button,
+        sourceButton: item,
         selectedReplyId: context.selectedReplyId,
       });
     });
 
-    menu.appendChild(button);
-    if (menu.dataset) menu.dataset.bceExportFor = key;
+    container.appendChild(item);
+    return true;
   }
 
   function findBestOpenCommentMenu() {

@@ -2,16 +2,15 @@
 // @name         Bilibili Comment Thread Exporter
 // @name:zh-CN   B站评论楼层导出器
 // @namespace    https://space.bilibili.com/1937432404
-// @version      1.0.2
+// @version      1.0.3
 // @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/bilibili-comment-thread-exporter.user.js
 // @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/bilibili-comment-thread-exporter.user.js
-// @description  Copy or download a complete Bilibili comment thread as Markdown from the native three-dot menu.
-// @description:zh-CN 在 B 站评论三点菜单中复制或下载完整楼层 Markdown，保留点赞数、IP 属地与完整性校验。
+// @description  Download a complete Bilibili comment thread as Markdown from the native three-dot menu.
+// @description:zh-CN 在 B 站评论三点菜单中下载完整楼层 Markdown，并保留精确回复关系、点赞数、IP 属地与完整性校验。
 // @author       素晴
 // @match        https://www.bilibili.com/video/*
 // @connect      api.bilibili.com
 // @grant        GM_xmlhttpRequest
-// @grant        GM_setClipboard
 // @run-at       document-start
 // @noframes
 // ==/UserScript==
@@ -25,7 +24,7 @@
 
   const META = Object.freeze({
     id: "bce-thread-exporter",
-    version: "1.0.2",
+    version: "1.0.3",
     installGuard: "__bceCommentExporterV1Installed",
   });
 
@@ -60,18 +59,10 @@
 
   const EXPORT_ACTIONS = Object.freeze([
     Object.freeze({
-      id: "copy-md",
-      label: "导出本楼",
-      title: "复制本楼 Markdown",
-      destination: "clipboard",
-      successText: "已复制 Markdown",
-    }),
-    Object.freeze({
       id: "download-md",
-      label: "下载本楼 MD",
+      label: "导出为 MD",
       title: "下载本楼 Markdown 文件",
-      destination: "download",
-      successText: "已下载 Markdown",
+      successText: "已导出 Markdown",
     }),
   ]);
 
@@ -403,7 +394,7 @@
       throwIfCancelled(task);
 
       const markdown = formatThreadMarkdown(thread);
-      await deliverMarkdown(action, thread, markdown);
+      deliverMarkdown(thread, markdown);
 
       const replyCountText = `${thread.exporter.actualReplyCount} 条回复`;
       showToast(
@@ -422,17 +413,12 @@
     }
   }
 
-  async function deliverMarkdown(action, thread, markdown) {
-    if (action.destination === "download") {
-      downloadText(
-        buildMarkdownFileName(thread),
-        markdown,
-        MIME.markdown
-      );
-      return;
-    }
-
-    await copyText(markdown);
+  function deliverMarkdown(thread, markdown) {
+    downloadText(
+      buildMarkdownFileName(thread),
+      markdown,
+      MIME.markdown
+    );
   }
 
   function buildMarkdownFileName(thread) {
@@ -1162,15 +1148,6 @@
 
   function escapeMarkdown(text) {
     return String(text || "").replace(/([\\*_\`[\]])/g, "\\$1");
-  }
-
-  async function copyText(text) {
-    if (typeof GM_setClipboard === "function") {
-      GM_setClipboard(text, "text");
-      return;
-    }
-
-    await navigator.clipboard.writeText(text);
   }
 
   function downloadText(fileName, text, type) {

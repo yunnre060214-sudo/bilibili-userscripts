@@ -43,6 +43,7 @@ test('ProMax allows a reused XHR after an earlier blocked URL', () => {
 });
 function exporter(extra = {}) {
   return load('bilibili-comment-thread-exporter', '  boot();', `globalThis.api = { state, patchXhr, patchFetch, looksLikeCommentApi, scheduleScan, fetchThread,
+    simplifyReply, formatThreadMarkdown, getReplyLike, getReplyDataFromElement, resolveCommentExportContext,
     setRequest(fn) { requestJson = fn; delay = async () => {}; },
     setScan(fn) { scanPageForCommentTargets = fn; },
     setIngest(fn) { ingestCommentPayload = fn; } };`, extra);
@@ -80,6 +81,35 @@ test('exporter deduplicates overlapping pages and keeps fetching remaining repli
   let requests = 0; api.setRequest(async () => ({ code: 0, data: { root: reply('1'), replies: pages[requests++] || [], page: { count: 4 } } }));
   const result = await api.fetchThread('1');
   assert.deepEqual(Array.from(result.replies, r => r.rpid), ['2', '3', '4', '5']); assert.equal(requests, 3);
+});
+test('exporter preserves like counts and writes them to Markdown', () => {
+  const api = exporter({ document: { querySelector: () => null, title: 'test' } });
+  const root = api.simplifyReply({ rpid_str: '10001', root: 0, like: '42', ctime: 0, content: { message: 'root' }, member: { uname: 'A' } });
+  const child = api.simplifyReply({ rpid_str: '10002', root: 10001, parent: 10001, like: 7, ctime: 0, content: { message: 'child' }, member: { uname: 'B' } });
+  assert.equal(root.like, 42);
+  assert.equal(child.like, 7);
+  const markdown = api.formatThreadMarkdown({
+    exporter: { version: 'test', truncated: false },
+    source: { title: 'test', url: 'https://example.test', bvid: 'BV1', aid: 1, rootRpid: '10001', selectedRpid: '10001' },
+    selected: root,
+    root,
+    replies: [child],
+  });
+  assert.match(markdown, /点赞 42/);
+  assert.match(markdown, /点赞 7/);
+});
+
+test('exporter reads comment ids and roots from Bilibili custom-element __data', () => {
+  const api = exporter();
+  const element = {
+    __data: { rpid_str: '10002', root: 10001, like: 9, content: { message: 'x' }, member: {} },
+    getAttribute: () => null,
+    querySelectorAll: () => [],
+  };
+  const data = api.getReplyDataFromElement(element);
+  assert.equal(data.rpid_str, '10002');
+  const context = api.resolveCommentExportContext(element);
+  assert.deepEqual({ ...context }, { rootId: '10001', selectedReplyId: '10002' });
 });
 function anti(extra = {}) {
   return load('bilibili-comment-anti-fraud-pro', '  init();', `globalThis.api = { patchXhr, requestJson, STATE,

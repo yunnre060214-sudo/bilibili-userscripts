@@ -87,12 +87,6 @@ const assert = require('node:assert/strict');
       });
     });
 
-    await page.addInitScript(() => {
-      window.GM_setClipboard = text => {
-        window.copiedText = text;
-      };
-    });
-
     await page.goto('https://www.bilibili.com/video/BV1234567890');
 
     await page.evaluate(() => {
@@ -156,26 +150,20 @@ const assert = require('node:assert/strict');
     await page.locator('bili-comment-menu .bce-menu-export-item').first().waitFor();
 
     const menuLabels = await page.locator('bili-comment-menu .bce-menu-export-item').allTextContents();
-    assert.deepEqual(menuLabels, ['导出本楼', '下载本楼 MD']);
-
-    await page.locator('bili-comment-menu .bce-menu-export-item').filter({ hasText: '导出本楼' }).first().click();
-    await page.waitForFunction(() => window.copiedText?.includes('测试回复 5'));
-
-    const markdown = await page.evaluate(() => window.copiedText);
-    assert.equal(markdown.split('测试回复 3').length - 1, 1);
-    assert.match(markdown, /点赞 67/);
-    assert.match(markdown, /IP属地：重庆/);
+    assert.deepEqual(menuLabels, ['导出为 MD']);
 
     const downloadPromise = page.waitForEvent('download');
-    await page.locator('bili-comment-menu .bce-menu-export-item').filter({ hasText: '下载本楼 MD' }).click();
+    await page.locator('bili-comment-menu .bce-menu-export-item').filter({ hasText: '导出为 MD' }).click();
     const download = await downloadPromise;
     const suggestedName = download.suggestedFilename();
     const downloadedMarkdown = fs.readFileSync(await download.path(), 'utf8');
 
     assert.match(suggestedName, /\.md$/i);
     assert.match(downloadedMarkdown, /测试回复 5/);
+    assert.equal(downloadedMarkdown.split('测试回复 3').length - 1, 1);
     assert.match(downloadedMarkdown, /点赞 67/);
     assert.match(downloadedMarkdown, /IP属地：重庆/);
+    assert.match(downloadedMarkdown, /回复 \[0002\]\(#msg-0002\) 测试用户2/);
     assert.doesNotMatch(downloadedMarkdown, /schema v/i);
 
     assert.equal(
@@ -208,7 +196,7 @@ const assert = require('node:assert/strict');
     });
 
     assert.deepEqual(errors, []);
-    console.log('PASS: four scripts loaded together; native comment menu Markdown copy/download, native XHR, tracker response and high/low/high switching; no page errors.');
+    console.log('PASS: four scripts loaded together; native comment menu Markdown download, linked reply graph, native XHR, tracker response and high/low/high switching; no page errors.');
   } finally {
     await browser.close();
   }

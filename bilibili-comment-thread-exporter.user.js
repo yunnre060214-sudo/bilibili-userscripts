@@ -1140,11 +1140,14 @@
       const relation = graph.relationById.get(node.id);
       const parentResolved = Boolean(relation?.parentId && graph.nodeById.has(relation.parentId));
 
+      const issues = graph.issuesById.get(node.id) || new Set();
+      const relationBroken = issues.has("self-cycle") || issues.has("cycle");
+
       if (!relation?.parentId) summary.unknown += 1;
       if (relation?.parentId && !parentResolved) summary.missing += 1;
-      if (relation?.source === "explicit" && parentResolved) summary.explicitResolved += 1;
-      if ((relation?.source === "root" || relation?.source === "thread-root") && parentResolved) summary.inferred += 1;
-      if ((graph.issuesById.get(node.id)?.size || 0) > 0) summary.abnormal += 1;
+      if (relation?.source === "explicit" && parentResolved && !relationBroken) summary.explicitResolved += 1;
+      if ((relation?.source === "root" || relation?.source === "thread-root") && parentResolved && !relationBroken) summary.inferred += 1;
+      if (issues.size > 0) summary.abnormal += 1;
     }
 
     return summary;

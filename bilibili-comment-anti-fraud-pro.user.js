@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BiliEcho
 // @namespace    https://space.bilibili.com/1937432404
-// @version      4.3.0
+// @version      1.0.0
 // @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/biliecho.user.js
 // @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/biliecho.user.js
 // @description  B站评论发送后自动检查无账号可见性：正常、疑似仅自己可见、疑似秒删、可疑状态。风控响应会自动降级，不误判评论状态。支持设置、取消队列、透明报告和无限次重新检测。无 AI、无 API Key。

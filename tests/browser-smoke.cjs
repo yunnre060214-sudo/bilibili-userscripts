@@ -35,14 +35,14 @@ const assert = require('node:assert/strict');
     await page.route('**/*', route => {
       const url = new URL(route.request().url());
 
-      if (url.pathname.startsWith('/video/')) {
+      if (url.pathname.startsWith('/video/') || url.hostname === 'live.bilibili.com') {
         return route.fulfill({
           contentType: 'text/html',
           body: `<!doctype html>
 <html>
-<head><meta charset="utf-8"><title>四脚本兼容性测试</title></head>
+<head><meta charset="utf-8"><title>BiliForge 集成兼容性测试</title></head>
 <body>
-  <h1>四脚本兼容性测试</h1>
+  <h1>BiliForge 集成兼容性测试</h1>
   <p>本页与所有接口均为测试数据。</p>
   <div class="quality-wrap">
     <button class="quality-item active" data-qn="80">流畅</button>
@@ -141,7 +141,6 @@ const assert = require('node:assert/strict');
       'biliforge',
       'biliecho',
       'bilibili-comment-thread-exporter',
-      'bilibili-live-auto-quality',
     ]) {
       await page.addScriptTag({ path: path.join(__dirname, '..', file + '.user.js') });
     }
@@ -183,7 +182,16 @@ const assert = require('node:assert/strict');
       0
     );
 
-    await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+    await page.goto('https://live.bilibili.com/123');
+
+    await page.evaluate(() => {
+      document.querySelectorAll('.quality-item').forEach(el => el.addEventListener('click', () => {
+        document.querySelector('.quality-item.active')?.classList.remove('active');
+        el.classList.add('active');
+      }));
+    });
+
+    await page.addScriptTag({ path: path.join(__dirname, '..', 'biliforge.user.js') });
     await page.waitForFunction(() => document.querySelector('.quality-item.active')?.textContent === '原画');
     await page.evaluate(() => window.dispatchEvent(new Event('blur')));
     await page.waitForFunction(() => document.querySelector('.quality-item.active')?.textContent === '流畅');
@@ -196,7 +204,7 @@ const assert = require('node:assert/strict');
     });
 
     assert.deepEqual(errors, []);
-    console.log('PASS: four scripts loaded together; native comment menu Markdown download, linked reply graph, native XHR, tracker response and high/low/high switching; no page errors.');
+    console.log('PASS: three userscripts plus integrated BiliForge live controller; Markdown export, linked reply graph, native XHR, tracker response and high/low/high switching; no page errors.');
   } finally {
     await browser.close();
   }

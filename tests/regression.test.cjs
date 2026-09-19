@@ -80,6 +80,7 @@ function exporter(extra = {}) {
       fetchThread,
       normalizeReply,
       formatThreadMarkdown,
+      buildThreadGraph,
       beginExportTask,
       cancelActiveTask,
       makeContextKey,
@@ -128,9 +129,9 @@ test('ProMax allows a reused XHR after an earlier blocked URL', () => {
   assert.equal(xhr.sent, 1);
 });
 
-test('exporter 1.0.2 keeps the event-driven architecture and no legacy scanners', () => {
+test('exporter 1.0.3 keeps the event-driven architecture and no legacy scanners', () => {
   const code = source('bilibili-comment-thread-exporter');
-  assert.match(code, /@version\s+1\.0\.2/);
+  assert.match(code, /@version\s+1\.0\.3/);
   assert.doesNotMatch(code, /function\s+patchFetch\b/);
   assert.doesNotMatch(code, /function\s+patchXhr\b/);
   assert.doesNotMatch(code, /function\s+observePage\b/);
@@ -138,12 +139,14 @@ test('exporter 1.0.2 keeps the event-driven architecture and no legacy scanners'
   assert.doesNotMatch(code, /function\s+ensureShell\b/);
 });
 
-test('exporter 1.0.2 keeps Markdown-only export behavior', () => {
+test('exporter 1.0.3 is download-only and contains no clipboard path', () => {
   const code = source('bilibili-comment-thread-exporter');
-  assert.doesNotMatch(code, /导出本楼 JSON/);
-  assert.doesNotMatch(code, /application\/json;charset/);
-  assert.doesNotMatch(code, /schemaVersion/);
-  assert.match(code, /下载本楼 MD/);
+  assert.doesNotMatch(code, /导出本楼/);
+  assert.doesNotMatch(code, /GM_setClipboard/);
+  assert.doesNotMatch(code, /navigator\.clipboard/);
+  assert.doesNotMatch(code, /function\s+copyText\b/);
+  assert.doesNotMatch(code, /destination:\s*["']clipboard["']/);
+  assert.match(code, /导出为 MD/);
   assert.match(code, /text\/markdown;charset=utf-8/);
 });
 
@@ -226,7 +229,7 @@ test('exporter recognizes the actual Bilibili three-dot button path and menu hos
   assert.equal(api.findBiliCommentMenuHost(path, action), menuHost);
 });
 
-test('exporter injects copy and download Markdown native-style menu items', () => {
+test('exporter injects only one Markdown download menu item', () => {
   const api = exporter({ document: { createElement: makeLi } });
   const appended = [];
   const template = makeLi();
@@ -259,9 +262,10 @@ test('exporter injects copy and download Markdown native-style menu items', () =
   }
   api.ensureMenuAction(options, context, api.EXPORT_ACTIONS[0]);
 
-  assert.equal(appended.length, 2);
-  assert.equal(appended[0].textContent, '导出本楼');
-  assert.equal(appended[1].textContent, '下载本楼 MD');
+  assert.equal(api.EXPORT_ACTIONS.length, 1);
+  assert.equal(appended.length, 1);
+  assert.equal(appended[0].textContent, '导出为 MD');
+  assert.equal(appended[0].dataset.bceAction, 'download-md');
 });
 
 function makeLi() {
@@ -327,7 +331,7 @@ test('exporter paginates, deduplicates and flattens replies', async () => {
     seedReply: reply('3', '2'),
   });
 
-  assert.equal(result.exporter.version, '1.0.2');
+  assert.equal(result.exporter.version, '1.0.3');
   assert.equal(result.exporter.complete, true);
   assert.equal(result.exporter.expectedReplyCount, 4);
   assert.equal(result.exporter.actualReplyCount, 4);
@@ -424,12 +428,57 @@ test('exporter Markdown includes likes, UID, IP location and reply target', () =
     replies: [child],
   });
 
+  assert.match(markdown, /<a id="msg-0001"><\/a>/);
+  assert.match(markdown, /<a id="msg-0002"><\/a>/);
   assert.match(markdown, /点赞 67/);
   assert.match(markdown, /UID 10/);
   assert.match(markdown, /IP属地：重庆/);
-  assert.match(markdown, /回复 \*\*根用户\*\*/);
+  assert.match(markdown, /回复 \[0001\]\(#msg-0001\) 根用户：「根评论」/);
+  assert.match(markdown, /直接回复（1）：\[0002\]\(#msg-0002\) 回复用户/);
   assert.match(markdown, /IP属地：广东/);
+  assert.doesNotMatch(markdown, /## 选中的评论/);
   assert.doesNotMatch(markdown, /schema v/i);
+});
+
+test('exporter graph keeps deep reply chains flat and precise', () => {
+  const api = exporter({
+    document: { querySelector: () => null, title: '测试视频' },
+  });
+
+  const make = (id, parent, message) => api.normalizeReply({
+    rpid_str: String(id),
+    root: id === 1 ? 0 : 1,
+    parent,
+    ctime: 1789787000 + id,
+    member: { mid: String(id), uname: `用户${id}` },
+    content: { message },
+  });
+
+  const root = make(1, 0, '根');
+  const replies = [
+    make(2, 1, '第一层'),
+    make(3, 2, '第二层'),
+    make(4, 3, '第三层'),
+    make(5, 4, '第四层'),
+    make(6, 5, '第五层'),
+    make(7, 6, '第六层'),
+  ];
+
+  const thread = {
+    exporter: { complete: true, actualReplyCount: 6, expectedReplyCount: 6 },
+    source: { title: '深链', url: '', bvid: '', oid: '1', rootRpid: '1', selectedRpid: '7' },
+    selected: replies.at(-1),
+    root,
+    replies,
+  };
+
+  const graph = api.buildThreadGraph(thread);
+  const markdown = api.formatThreadMarkdown(thread);
+
+  assert.equal(graph.nodeById.get('7').depth, 6);
+  assert.match(markdown, /回复 \[0006\]\(#msg-0006\) 用户6：「第五层」/);
+  assert.match(markdown, /路径：\[0001\]\(#msg-0001\) → … → \[0005\]\(#msg-0005\) → \[0006\]\(#msg-0006\) → \[0007\]\(#msg-0007\)/);
+  assert.doesNotMatch(markdown, /^ {4,}/m);
 });
 
 test('starting a new export task cancels and aborts the previous task', () => {
@@ -437,7 +486,7 @@ test('starting a new export task cancels and aborts the previous task', () => {
   let aborted = 0;
 
   const first = api.beginExportTask();
-  first.abort = () => { aborted += 1; };
+  first.abortCurrentRequest = () => { aborted += 1; };
   const second = api.beginExportTask();
 
   assert.equal(first.cancelled, true);

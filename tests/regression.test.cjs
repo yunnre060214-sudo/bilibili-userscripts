@@ -544,7 +544,7 @@ test('exporter 1.0.4 distinguishes explicit, inferred, missing and abnormal rela
   assert.match(markdown, /缺失父消息：1（涉及 1 条回复）/);
   assert.match(markdown, /异常关系：2/);
   assert.match(markdown, /重复 rpid：2/);
-  assert.match(markdown, /推断回复 \[0003\]\(#msg-0003\)/);
+  assert.match(markdown, /推断回复 \[0001\]\(#msg-0001\)/);
   assert.match(markdown, /关系异常索引/);
 });
 

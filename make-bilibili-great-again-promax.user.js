@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         Make BiliBili Great Again ProMax
+// @name         BiliForge
 // @namespace    https://space.bilibili.com/1937432404
-// @version      3.1.2
-// @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/make-bilibili-great-again-promax.user.js
-// @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/make-bilibili-great-again-promax.user.js
+// @version      3.2.0
+// @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/biliforge.user.js
+// @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/biliforge.user.js
 // @description  Bilibili 体验优化，去广告，URL 清理，P2P CDN 控制，直播优化，文章复制修复
 // @author       素晴
 // @match        https://*.bilibili.com/*
@@ -17,7 +17,7 @@
     'use strict';
 
     const CONFIG = Object.freeze({
-        name: 'MBGA ProMax',
+        name: 'BiliForge',
         debug: false,
 
         features: Object.freeze({
@@ -1668,13 +1668,14 @@
             this.started = true;
 
             const api = {
-                version: '3.1.0',
+                version: '3.2.0',
                 config: CONFIG,
                 hooks: HookManager,
                 restoreAll: () => HookManager.restoreAll(),
                 restore: (owner) => HookManager.restore(owner)
             };
 
+            W.__BILIFORGE__ = api;
             W.__MBGA_PROMAX__ = api;
             W.__MBGA__ = api;
 

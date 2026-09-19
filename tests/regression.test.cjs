@@ -44,6 +44,7 @@ test('ProMax allows a reused XHR after an earlier blocked URL', () => {
 function exporter(extra = {}) {
   return load('bilibili-comment-thread-exporter', '  boot();', `globalThis.api = { state, patchXhr, patchFetch, looksLikeCommentApi, scheduleScan, fetchThread,
     simplifyReply, formatThreadMarkdown, getReplyLike, getReplyDataFromElement, resolveCommentExportContext,
+    findCommentActionRendererInPath, findBiliCommentMenuHost,
     setRequest(fn) { requestJson = fn; delay = async () => {}; },
     setScan(fn) { scanPageForCommentTargets = fn; },
     setIngest(fn) { ingestCommentPayload = fn; } };`, extra);
@@ -110,6 +111,28 @@ test('exporter reads comment ids and roots from Bilibili custom-element __data',
   assert.equal(data.rpid_str, '10002');
   const context = api.resolveCommentExportContext(element);
   assert.deepEqual({ ...context }, { rootId: '10001', selectedReplyId: '10002' });
+});
+
+test('exporter locates the real Bilibili comment menu from the action renderer click path', () => {
+  const api = exporter();
+  const menuHost = { tagName: 'BILI-COMMENT-MENU' };
+  const more = {
+    nodeType: 1,
+    id: 'more',
+    querySelector: selector => selector === 'bili-comment-menu' ? menuHost : null,
+  };
+  const action = {
+    tagName: 'BILI-COMMENT-ACTION-BUTTONS-RENDERER',
+    __data: { rpid_str: '314390848657', root_str: '0', root: 0, like: 67, content: { message: 'x' }, member: {} },
+    shadowRoot: { querySelector: () => menuHost },
+    getAttribute: () => null,
+    querySelectorAll: () => [],
+  };
+  const path = [{ tagName: 'SVG' }, more, action];
+  assert.equal(api.findCommentActionRendererInPath(path), action);
+  assert.equal(api.findBiliCommentMenuHost(path, action), menuHost);
+  const context = api.resolveCommentExportContext(action);
+  assert.deepEqual({ ...context }, { rootId: '314390848657', selectedReplyId: '314390848657' });
 });
 function anti(extra = {}) {
   return load('bilibili-comment-anti-fraud-pro', '  init();', `globalThis.api = { patchXhr, requestJson, STATE,

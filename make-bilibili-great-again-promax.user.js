@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BiliForge
 // @namespace    https://space.bilibili.com/1937432404
-// @version      3.3.0
+// @version      3.3.1
 // @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/biliforge.user.js
 // @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/biliforge.user.js
 // @description  Bilibili 体验优化，去广告，URL 清理，P2P CDN 控制，直播优化，文章复制修复
@@ -1666,8 +1666,6 @@
             if (this.tripped) return;
 
             this.tripped = true;
-            W.forceHighestQuality = false;
-            StorageManager.set('forceHighestQuality', false);
             LiveQualityController.suppressHigh();
 
             try {
@@ -1991,17 +1989,30 @@
                     ? this.getLowestItem(items)
                     : this.getHighestItem(items);
 
-                if (target) {
+                const active = SafeDOM.query(this.selectors.activeQuality);
+                const targetQn = this.getQualityQn(target);
+                const activeQn = this.getQualityQn(active);
+                const alreadySelected = Boolean(
+                    target
+                    && active
+                    && (
+                        target === active
+                        || (targetQn && activeQn && targetQn === activeQn)
+                        || this.getElementText(target) === this.getElementText(active)
+                    )
+                );
+
+                if (target && !alreadySelected) {
                     target.click();
                     Logger.log(
                         mode === 'low' ? 'live quality -> low:' : 'live quality -> high:',
                         this.getElementText(target)
                     );
-                } else {
+                } else if (!target) {
                     Logger.warn('live quality option not found');
                 }
 
-                if (target && refreshAfterSwitch) {
+                if (target && !alreadySelected && refreshAfterSwitch) {
                     setTimeout(() => {
                         if (currentOperation === this.operationId) {
                             this.clickPlayerRefresh();
@@ -2070,7 +2081,7 @@
             this.started = true;
 
             const api = {
-                version: '3.3.0',
+                version: '3.3.1',
                 config: CONFIG,
                 hooks: HookManager,
                 live: Object.freeze({

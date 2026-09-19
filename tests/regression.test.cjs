@@ -3,117 +3,195 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const path = require('node:path');
+
 const source = name => fs.readFileSync(path.join(__dirname, '..', name + '.user.js'), 'utf8');
+
 function load(name, marker, injection, extra = {}) {
-  const context = vm.createContext({ console, URL, Request, Response, AbortController, DOMException,
-    setTimeout, clearTimeout, setInterval, clearInterval, location: { href: 'https://www.bilibili.com/video/BV1234567890', pathname: '/video/BV1234567890' },
-    document: {}, window: {}, localStorage: { getItem: () => null }, ...extra });
+  const context = vm.createContext({
+    console,
+    URL,
+    Request,
+    Response,
+    AbortController,
+    DOMException,
+    setTimeout,
+    clearTimeout,
+    setInterval,
+    clearInterval,
+    location: {
+      href: 'https://www.bilibili.com/video/BV1234567890',
+      pathname: '/video/BV1234567890',
+    },
+    document: {},
+    window: {},
+    localStorage: { getItem: () => null },
+    ...extra,
+  });
+
   const code = source(name);
-  assert.ok(code.includes(marker));
+  assert.ok(code.includes(marker), `missing marker in ${name}`);
   vm.runInContext(code.replace(marker, injection), context);
   return context.api;
 }
+
 function xhrClass() {
   return class extends EventTarget {
     open(method, url) { this.url = url; }
     send() { this.sent = (this.sent || 0) + 1; }
     abort() { this.aborted = true; }
     complete(payload, type = '') {
-      this.responseType = type; this.response = type === 'json' ? payload : JSON.stringify(payload);
-      Object.defineProperty(this, 'responseText', { configurable: true, get: () => {
-        if (type === 'json') throw new DOMException('InvalidStateError');
-        return this.response;
-      }});
+      this.responseType = type;
+      this.response = type === 'json' ? payload : JSON.stringify(payload);
+      Object.defineProperty(this, 'responseText', {
+        configurable: true,
+        get: () => {
+          if (type === 'json') throw new DOMException('InvalidStateError');
+          return this.response;
+        },
+      });
       this.dispatchEvent(new Event('load'));
     }
   };
 }
+
 function network(extra = {}) {
-  return load('make-bilibili-great-again-promax', '    App.init();', '    globalThis.api = NetworkManager;', extra);
+  return load(
+    'make-bilibili-great-again-promax',
+    '    App.init();',
+    '    globalThis.api = NetworkManager;',
+    extra
+  );
 }
+
+function exporter(extra = {}) {
+  return load(
+    'bilibili-comment-thread-exporter',
+    '  boot();',
+    `globalThis.api = {
+      state,
+      findMoreButtonTrigger,
+      findCommentActionRendererInPath,
+      findBiliCommentMenuHost,
+      getReplyDataFromElement,
+      resolveCommentExportContext,
+      ensureMenuItem,
+      fetchThread,
+      simplifyReply,
+      formatThreadMarkdown,
+      beginExportTask,
+      cancelActiveTask,
+      contextKey,
+      getReplyLike,
+      setRequest(fn) { requestJson = fn; },
+      setDelay(fn) { waitBetweenPages = fn; },
+    };`,
+    extra
+  );
+}
+
+function anti(extra = {}) {
+  return load(
+    'bilibili-comment-anti-fraud-pro',
+    '  init();',
+    `globalThis.api = {
+      patchXhr,
+      requestJson,
+      STATE,
+      setObserve(fn) { observeAddCommentResponse = fn; },
+      setFetch(fn) { requestJsonByFetch = fn; },
+      setGm(fn) { requestJsonByGm = fn; canUseGmXhr = () => true; },
+    };`,
+    extra
+  );
+}
+
 test('ProMax returns a valid empty 204 for blocked fetch', async () => {
   const response = await network().makeBlockedFetchResult('empty', 'tracker');
-  assert.equal(response.status, 204); assert.equal(await response.text(), '');
+  assert.equal(response.status, 204);
+  assert.equal(await response.text(), '');
 });
+
 test('ProMax allows a reused XHR after an earlier blocked URL', () => {
-  const XHR = xhrClass(); const api = network({ window: { XMLHttpRequest: XHR } });
-  api.addRule('test', url => url.includes('blocked') ? { block: true } : null); api.patchXHR();
-  const xhr = new XHR(); xhr.open('GET', '/blocked'); xhr.send();
-  xhr.open('GET', '/allowed'); xhr.send(); assert.equal(xhr.sent, 1);
-});
-function exporter(extra = {}) {
-  return load('bilibili-comment-thread-exporter', '  boot();', `globalThis.api = { state, patchXhr, patchFetch, looksLikeCommentApi, scheduleScan, fetchThread,
-    simplifyReply, formatThreadMarkdown, getReplyLike, getReplyDataFromElement, resolveCommentExportContext,
-    findCommentActionRendererInPath, findBiliCommentMenuHost, injectIntoBiliCommentMenu,
-    setRequest(fn) { requestJson = fn; delay = async () => {}; },
-    setScan(fn) { scanPageForCommentTargets = fn; },
-    setIngest(fn) { ingestCommentPayload = fn; } };`, extra);
-}
-test('exporter scan runs despite continuous mutations', () => {
-  let serial = 0; const timers = new Map(); let scans = 0;
-  const api = exporter({ window: { setTimeout: fn => { timers.set(++serial, fn); return serial; } }, clearTimeout: id => timers.delete(id) });
-  api.setScan(() => scans++); api.scheduleScan(600); const first = timers.keys().next().value;
-  api.scheduleScan(600); assert.ok(timers.has(first), 'pending scan must not be postponed');
-  timers.get(first)(); assert.equal(scans, 1);
-  api.scheduleScan(600); assert.ok(timers.has(serial));
-});
-test('exporter accepts only the actual comment API host and path', () => {
-  const api = exporter();
-  assert.equal(api.looksLikeCommentApi('https://evil.test/api.bilibili.com/x/v2/reply'), false);
-  assert.equal(api.looksLikeCommentApi('https://api.bilibili.com/x/v2/replyFake'), false);
-  assert.equal(api.looksLikeCommentApi('https://api.bilibili.com/x/v2/reply/reply?oid=1'), true);
-});
-test('exporter supports JSON XHR and does not accumulate listeners on reuse', () => {
-  const XHR = xhrClass(); const api = exporter(); const received = [];
-  api.setIngest(p => received.push(p)); api.patchXhr({ XMLHttpRequest: XHR });
+  const XHR = xhrClass();
+  const api = network({ window: { XMLHttpRequest: XHR } });
+  api.addRule('test', url => url.includes('blocked') ? { block: true } : null);
+  api.patchXHR();
+
   const xhr = new XHR();
-  for (let i = 0; i < 2; i++) { xhr.open('GET', 'https://api.bilibili.com/x/v2/reply'); xhr.send(); xhr.complete({ code: 0, n: i }, 'json'); }
-  assert.equal(received.length, 2);
-});
-test('exporter observer cannot turn successful fetch into a rejection', async () => {
-  const response = { clone() { throw new Error('body already consumed'); } };
-  const page = { fetch: async () => response }; exporter().patchFetch(page);
-  assert.equal(await page.fetch('https://api.bilibili.com/x/v2/reply'), response);
-});
-test('exporter deduplicates overlapping pages and keeps fetching remaining replies', async () => {
-  const api = exporter({ document: { querySelector: () => null, title: 'test' } }); api.state.aid = 1;
-  const reply = id => ({ rpid_str: id, root: 1, content: { message: id }, member: {} });
-  const pages = [[reply('2'), reply('3')], [reply('3'), reply('4')], [reply('5')]];
-  let requests = 0; api.setRequest(async () => ({ code: 0, data: { root: reply('1'), replies: pages[requests++] || [], page: { count: 4 } } }));
-  const result = await api.fetchThread('1');
-  assert.deepEqual(Array.from(result.replies, r => r.rpid), ['2', '3', '4', '5']); assert.equal(requests, 3);
-});
-test('exporter preserves like counts and writes them to Markdown', () => {
-  const api = exporter({ document: { querySelector: () => null, title: 'test' } });
-  const root = api.simplifyReply({ rpid_str: '10001', root: 0, like: '42', ctime: 0, content: { message: 'root' }, member: { uname: 'A' } });
-  const child = api.simplifyReply({ rpid_str: '10002', root: 10001, parent: 10001, like: 7, ctime: 0, content: { message: 'child' }, member: { uname: 'B' } });
-  assert.equal(root.like, 42);
-  assert.equal(child.like, 7);
-  const markdown = api.formatThreadMarkdown({
-    exporter: { version: 'test', truncated: false },
-    source: { title: 'test', url: 'https://example.test', bvid: 'BV1', aid: 1, rootRpid: '10001', selectedRpid: '10001' },
-    selected: root,
-    root,
-    replies: [child],
-  });
-  assert.match(markdown, /点赞 42/);
-  assert.match(markdown, /点赞 7/);
+  xhr.open('GET', '/blocked');
+  xhr.send();
+  xhr.open('GET', '/allowed');
+  xhr.send();
+
+  assert.equal(xhr.sent, 1);
 });
 
-test('exporter reads comment ids and roots from Bilibili custom-element __data', () => {
+test('exporter 1.0 removes the legacy page scanner and network observers', () => {
+  const code = source('bilibili-comment-thread-exporter');
+  assert.match(code, /@version\s+1\.0\.0/);
+  assert.doesNotMatch(code, /function\s+patchFetch\b/);
+  assert.doesNotMatch(code, /function\s+patchXhr\b/);
+  assert.doesNotMatch(code, /function\s+observePage\b/);
+  assert.doesNotMatch(code, /function\s+scanPageForCommentTargets\b/);
+  assert.doesNotMatch(code, /function\s+ensureShell\b/);
+});
+
+test('exporter resolves the clicked root comment directly from action renderer __data', () => {
   const api = exporter();
-  const element = {
-    __data: { rpid_str: '10002', root: 10001, like: 9, content: { message: 'x' }, member: {} },
-    getAttribute: () => null,
-    querySelectorAll: () => [],
+  const action = {
+    tagName: 'BILI-COMMENT-ACTION-BUTTONS-RENDERER',
+    __data: {
+      rpid: 314390848657,
+      rpid_str: '314390848657',
+      root: 0,
+      root_str: '0',
+      oid: 117290507045669,
+      oid_str: '117290507045669',
+      type: 1,
+      like: 67,
+      member: { mid: '325888754', uname: '狐鸽鸽儿' },
+      content: { message: '测试根评论' },
+      reply_control: { location: 'IP属地：重庆' },
+    },
   };
-  const data = api.getReplyDataFromElement(element);
-  assert.equal(data.rpid_str, '10002');
-  const context = api.resolveCommentExportContext(element);
-  assert.deepEqual({ ...context }, { rootId: '10001', selectedReplyId: '10002' });
+
+  const context = api.resolveCommentExportContext(action);
+  assert.deepEqual(
+    {
+      oid: context.oid,
+      type: context.type,
+      rootId: context.rootId,
+      selectedReplyId: context.selectedReplyId,
+    },
+    {
+      oid: '117290507045669',
+      type: 1,
+      rootId: '314390848657',
+      selectedReplyId: '314390848657',
+    }
+  );
 });
 
-test('exporter locates the real Bilibili comment menu from the action renderer click path', () => {
+test('exporter resolves a sub reply to its root while preserving selected rpid', () => {
+  const api = exporter();
+  const action = {
+    __data: {
+      rpid_str: '20002',
+      root_str: '20001',
+      root: 20001,
+      oid_str: '123',
+      type: 1,
+      content: { message: 'sub' },
+      member: {},
+    },
+  };
+
+  const context = api.resolveCommentExportContext(action);
+  assert.equal(context.rootId, '20001');
+  assert.equal(context.selectedReplyId, '20002');
+});
+
+test('exporter recognizes the actual Bilibili three-dot button path and menu host', () => {
   const api = exporter();
   const menuHost = { tagName: 'BILI-COMMENT-MENU' };
   const more = {
@@ -121,108 +199,311 @@ test('exporter locates the real Bilibili comment menu from the action renderer c
     id: 'more',
     querySelector: selector => selector === 'bili-comment-menu' ? menuHost : null,
   };
+  const button = {
+    nodeType: 1,
+    tagName: 'BUTTON',
+    parentElement: more,
+  };
   const action = {
     tagName: 'BILI-COMMENT-ACTION-BUTTONS-RENDERER',
-    __data: { rpid_str: '314390848657', root_str: '0', root: 0, like: 67, content: { message: 'x' }, member: {} },
     shadowRoot: { querySelector: () => menuHost },
-    getAttribute: () => null,
-    querySelectorAll: () => [],
   };
-  const path = [{ tagName: 'SVG' }, more, action];
+  const path = [button, more, action];
+
+  assert.equal(api.findMoreButtonTrigger(path), button);
   assert.equal(api.findCommentActionRendererInPath(path), action);
   assert.equal(api.findBiliCommentMenuHost(path, action), menuHost);
-  const context = api.resolveCommentExportContext(action);
-  assert.deepEqual({ ...context }, { rootId: '314390848657', selectedReplyId: '314390848657' });
 });
 
-test('exporter targets bili-comment-menu shadowRoot #options directly', () => {
-  const api = exporter({
-    document: {
-      createElement: tag => ({
-        tagName: tag.toUpperCase(),
-        classList: { add() {} },
-        dataset: {},
-        style: {},
-        addEventListener() {},
-        removeAttribute() {},
-      }),
-    },
-  });
-
+test('exporter injects separate Markdown and JSON native-style menu items', () => {
+  const api = exporter({ document: { createElement: makeLi } });
   const appended = [];
-  const firstLi = {
-    tagName: 'LI',
-    cloneNode: () => ({
-      tagName: 'LI',
-      classList: { add() {} },
-      dataset: {},
-      style: {},
-      addEventListener() {},
-      removeAttribute() {},
-    }),
-  };
+  const template = makeLi();
+
   const options = {
-    querySelector: selector => selector === '.bce-menu-export-item' ? null : firstLi,
-    appendChild: node => appended.push(node),
-  };
-  const menuHost = {
-    shadowRoot: {
-      querySelector: selector => selector === '#options' ? options : null,
+    querySelector(selector) {
+      if (selector === 'li') return template;
+      const match = selector.match(/data-bce-format="([^"]+)"/);
+      if (!match) return null;
+      return appended.find(item =>
+        item.classNameSet.has('bce-menu-export-item') &&
+        item.dataset.bceFormat === match[1]
+      ) || null;
+    },
+    appendChild(item) {
+      appended.push(item);
+      item.isConnected = true;
     },
   };
 
-  const ok = api.injectIntoBiliCommentMenu(menuHost, {
-    rootId: '314390848657',
-    selectedReplyId: '314390848657',
+  const context = {
+    oid: '123',
+    type: 1,
+    rootId: '10001',
+    selectedReplyId: '10001',
+  };
+
+  api.ensureMenuItem(options, context, 'markdown', '导出本楼');
+  api.ensureMenuItem(options, context, 'json', '导出本楼 JSON');
+  api.ensureMenuItem(options, context, 'markdown', '导出本楼');
+
+  assert.equal(appended.length, 2);
+  assert.equal(appended[0].textContent, '导出本楼');
+  assert.equal(appended[1].textContent, '导出本楼 JSON');
+});
+
+function makeLi() {
+  const classNameSet = new Set();
+  return {
+    tagName: 'LI',
+    dataset: {},
+    style: {},
+    classNameSet,
+    classList: { add: value => classNameSet.add(value) },
+    textContent: '',
+    title: '',
+    isConnected: false,
+    cloneNode: () => makeLi(),
+    removeAttribute() {},
+    addEventListener() {},
+    setAttribute() {},
+    remove() { this.removed = true; },
+  };
+}
+
+test('exporter paginates, deduplicates, flattens replies and emits schema v1', async () => {
+  const api = exporter({
+    document: { querySelector: () => null, title: '测试视频' },
   });
 
-  assert.equal(ok, true);
-  assert.equal(appended.length, 1);
-  assert.equal(appended[0].textContent, '导出本楼');
+  const reply = (id, parent = '1', extra = {}) => ({
+    rpid_str: id,
+    root_str: id === '1' ? '0' : '1',
+    root: id === '1' ? 0 : 1,
+    parent_str: id === '1' ? '0' : parent,
+    parent: id === '1' ? 0 : Number(parent),
+    ctime: 1789787077,
+    like: Number(id),
+    member: { mid: id, uname: `用户${id}` },
+    content: { message: `回复${id}` },
+    reply_control: { location: `IP属地：地区${id}` },
+    ...extra,
+  });
+
+  const pages = [
+    [reply('2', '1', { replies: [reply('3', '2')] })],
+    [reply('3', '2'), reply('4', '1')],
+    [reply('5', '1')],
+  ];
+
+  let requestIndex = 0;
+  api.setRequest(async () => ({
+    code: 0,
+    data: {
+      root: reply('1', '0'),
+      replies: pages[requestIndex++] || [],
+      page: { count: 4 },
+    },
+  }));
+  api.setDelay(async () => {});
+
+  const result = await api.fetchThread({
+    oid: '123',
+    type: 1,
+    rootId: '1',
+    selectedReplyId: '3',
+    seedReply: reply('3', '2'),
+  });
+
+  assert.equal(result.schemaVersion, 1);
+  assert.equal(result.exporter.version, '1.0.0');
+  assert.equal(result.exporter.complete, true);
+  assert.equal(result.exporter.expectedReplyCount, 4);
+  assert.equal(result.exporter.actualReplyCount, 4);
+  assert.deepEqual(Array.from(result.replies, item => item.rpid), ['2', '3', '4', '5']);
+  assert.equal(result.selected.rpid, '3');
+  assert.equal(result.selected.location, 'IP属地：地区3');
+  assert.equal(result.root.like, 1);
 });
-function anti(extra = {}) {
-  return load('bilibili-comment-anti-fraud-pro', '  init();', `globalThis.api = { patchXhr, requestJson, STATE,
-    setObserve(fn) { observeAddCommentResponse = fn; },
-    setFetch(fn) { requestJsonByFetch = fn; },
-    setGm(fn) { requestJsonByGm = fn; canUseGmXhr = () => true; } };`, extra);
-}
+
+test('exporter marks repeated pagination as incomplete', async () => {
+  const api = exporter({
+    document: { querySelector: () => null, title: '测试视频' },
+  });
+  const root = {
+    rpid_str: '1',
+    root: 0,
+    member: {},
+    content: { message: 'root' },
+  };
+  const child = {
+    rpid_str: '2',
+    root: 1,
+    parent: 1,
+    member: {},
+    content: { message: 'child' },
+  };
+
+  let requests = 0;
+  api.setRequest(async () => {
+    requests += 1;
+    return {
+      code: 0,
+      data: { root, replies: [child], page: { count: 99 } },
+    };
+  });
+  api.setDelay(async () => {});
+
+  const result = await api.fetchThread({
+    oid: '123',
+    type: 1,
+    rootId: '1',
+    selectedReplyId: '1',
+    seedReply: root,
+  });
+
+  assert.equal(requests, 2);
+  assert.equal(result.exporter.complete, false);
+  assert.equal(result.exporter.truncated, true);
+  assert.equal(result.exporter.actualReplyCount, 1);
+});
+
+test('exporter Markdown includes likes, UID, IP location and reply target', () => {
+  const api = exporter({
+    document: { querySelector: () => null, title: '测试视频' },
+  });
+
+  const root = api.simplifyReply({
+    rpid_str: '1',
+    root: 0,
+    parent: 0,
+    ctime: 1789787077,
+    like: 67,
+    member: { mid: '10', uname: '根用户' },
+    content: { message: '根评论' },
+    reply_control: { location: 'IP属地：重庆' },
+  });
+  const child = api.simplifyReply({
+    rpid_str: '2',
+    root: 1,
+    parent: 1,
+    ctime: 1789787078,
+    like: 8,
+    member: { mid: '20', uname: '回复用户' },
+    content: { message: '回复正文' },
+    reply_control: { location: 'IP属地：广东' },
+  });
+
+  const markdown = api.formatThreadMarkdown({
+    schemaVersion: 1,
+    exporter: {
+      complete: true,
+      actualReplyCount: 1,
+      expectedReplyCount: 1,
+    },
+    source: {
+      title: '测试视频',
+      url: 'https://www.bilibili.com/video/BV1234567890',
+      bvid: 'BV1234567890',
+      oid: '123',
+      rootRpid: '1',
+      selectedRpid: '2',
+    },
+    selected: child,
+    root,
+    replies: [child],
+  });
+
+  assert.match(markdown, /点赞 67/);
+  assert.match(markdown, /UID 10/);
+  assert.match(markdown, /IP属地：重庆/);
+  assert.match(markdown, /回复 \*\*根用户\*\*/);
+  assert.match(markdown, /IP属地：广东/);
+  assert.match(markdown, /schema v1/);
+});
+
+test('starting a new export task cancels and aborts the previous task', () => {
+  const api = exporter();
+  let aborted = 0;
+
+  const first = api.beginExportTask();
+  first.abort = () => { aborted += 1; };
+  const second = api.beginExportTask();
+
+  assert.equal(first.cancelled, true);
+  assert.equal(aborted, 1);
+  assert.equal(second.cancelled, false);
+  assert.equal(api.state.activeTask, second);
+});
+
 test('anti-fraud observes JSON XHR but ignores unrelated reuse', () => {
-  const XHR = xhrClass(); const api = anti({ window: { XMLHttpRequest: XHR } }); const received = [];
-  api.setObserve((url, text) => received.push(JSON.parse(text))); api.patchXhr();
-  const xhr = new XHR(); xhr.open('POST', 'https://api.bilibili.com/x/v2/reply/add'); xhr.send(); xhr.complete({ code: 0 }, 'json');
-  xhr.open('GET', 'https://api.bilibili.com/other'); xhr.send(); xhr.complete({ unrelated: true });
-  assert.equal(received.length, 1); assert.equal(received[0].code, 0);
+  const XHR = xhrClass();
+  const api = anti({ window: { XMLHttpRequest: XHR } });
+  const received = [];
+
+  api.setObserve((url, text) => received.push(JSON.parse(text)));
+  api.patchXhr();
+
+  const xhr = new XHR();
+  xhr.open('POST', 'https://api.bilibili.com/x/v2/reply/add');
+  xhr.send();
+  xhr.complete({ code: 0 }, 'json');
+  xhr.open('GET', 'https://api.bilibili.com/other');
+  xhr.send();
+  xhr.complete({ unrelated: true });
+
+  assert.equal(received.length, 1);
+  assert.equal(received[0].code, 0);
 });
+
 test('anti-fraud cancellation prevents fallback requests after fetch fails', async () => {
-  const api = anti(); let fallback = 0;
-  api.setFetch(async () => { api.STATE.cancelVersion++; throw new Error('offline'); });
-  api.setGm(async () => { fallback++; return { code: 0 }; });
-  await assert.rejects(api.requestJson('https://api.bilibili.com/x/v2/reply', { token: { version: 0 } }), { name: 'BfcCancelledError' });
+  const api = anti();
+  let fallback = 0;
+
+  api.setFetch(async () => {
+    api.STATE.cancelVersion++;
+    throw new Error('offline');
+  });
+  api.setGm(async () => {
+    fallback++;
+    return { code: 0 };
+  });
+
+  await assert.rejects(
+    api.requestJson('https://api.bilibili.com/x/v2/reply', { token: { version: 0 } }),
+    { name: 'BfcCancelledError' }
+  );
   assert.equal(fallback, 0);
 });
+
 test('live quality applies latest visibility request during menu loading', () => {
-  const pending = []; const clicks = [];
-  const item = (text, rank) => ({ textContent: text, dataset: { qn: rank }, getAttribute: () => null, click: () => clicks.push(text) });
-  let items = []; const high = item('原画', '10000'); const low = item('流畅', '80');
-  const doc = { querySelector: selector => selector.includes('.active') ? high : { click() {} }, querySelectorAll: () => items };
-  const api = load('bilibili-live-auto-quality', "    document.addEventListener('visibilitychange', () => {", "    globalThis.api = { selectQuality }; return; document.addEventListener('visibilitychange', () => {", { document: doc, setTimeout: fn => pending.push(fn) });
-  api.selectQuality('low', false); api.selectQuality('high', false); items = [high, low];
-  while (pending.length) pending.shift()();
-  assert.equal(clicks.at(-1), '原画');
-});
-test('exporter stops repeating pages and marks output incomplete', async () => {
-  const api = exporter({ document: { querySelector: () => null, title: 'test' } }); api.state.aid = 1;
-  let requests = 0; api.setRequest(async () => { requests++; return { code: 0, data: { replies: [{ rpid_str: '2', root: 1 }], page: { count: 99 } } }; });
-  const result = await api.fetchThread('1');
-  assert.equal(requests, 2); assert.equal(result.replies.length, 1); assert.equal(result.exporter.truncated, true);
-});
-test('exporter ignores its own panel mutations to avoid endless scan-render cycles', () => {
-  let notify; let scheduled = 0;
-  const api = load('bilibili-comment-thread-exporter', '  boot();', 'globalThis.api = { observePage }; updateShellVisibility = () => {}; scheduleScan = () => { globalThis.count(); };', {
-    MutationObserver: class { constructor(fn) { notify = fn; } observe() {} }, count: () => scheduled++,
+  const pending = [];
+  const clicks = [];
+  const item = (text, rank) => ({
+    textContent: text,
+    dataset: { qn: rank },
+    getAttribute: () => null,
+    click: () => clicks.push(text),
   });
-  api.observePage();
-  notify([{ target: { nodeType: 1, closest: () => ({}) } }]);
-  assert.equal(scheduled, 0);
-  notify([{ target: { nodeType: 1, closest: () => null } }]); assert.equal(scheduled, 1);
+  let items = [];
+  const high = item('原画', '10000');
+  const low = item('流畅', '80');
+  const doc = {
+    querySelector: selector => selector.includes('.active') ? high : { click() {} },
+    querySelectorAll: () => items,
+  };
+
+  const api = load(
+    'bilibili-live-auto-quality',
+    "    document.addEventListener('visibilitychange', () => {",
+    "    globalThis.api = { selectQuality }; return; document.addEventListener('visibilitychange', () => {",
+    { document: doc, setTimeout: fn => pending.push(fn) }
+  );
+
+  api.selectQuality('low', false);
+  api.selectQuality('high', false);
+  items = [high, low];
+  while (pending.length) pending.shift()();
+
+  assert.equal(clicks.at(-1), '原画');
 });

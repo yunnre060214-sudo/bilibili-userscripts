@@ -138,7 +138,7 @@ const assert = require('node:assert/strict');
     });
 
     for (const file of [
-      'make-bilibili-great-again-promax',
+      'biliforge',
       'bilibili-comment-anti-fraud-pro',
       'bilibili-comment-thread-exporter',
       'bilibili-live-auto-quality',

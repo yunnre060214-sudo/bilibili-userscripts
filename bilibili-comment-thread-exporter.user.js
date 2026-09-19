@@ -2,11 +2,11 @@
 // @name         Bilibili Comment Thread Exporter
 // @name:zh-CN   B站评论楼层导出器
 // @namespace    https://space.bilibili.com/1937432404
-// @version      1.0.3
+// @version      1.0.4
 // @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/bilibili-comment-thread-exporter.user.js
 // @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/bilibili-comment-thread-exporter.user.js
 // @description  Download a complete Bilibili comment thread as Markdown from the native three-dot menu.
-// @description:zh-CN 在 B 站评论三点菜单中下载完整楼层 Markdown，并保留精确回复关系、点赞数、IP 属地与完整性校验。
+// @description:zh-CN 在 B 站评论三点菜单中下载完整楼层 Markdown，并校验回复关系、异常数据与大型楼层完整性。
 // @author       素晴
 // @match        https://www.bilibili.com/video/*
 // @connect      api.bilibili.com
@@ -24,7 +24,7 @@
 
   const META = Object.freeze({
     id: "bce-thread-exporter",
-    version: "1.0.3",
+    version: "1.0.4",
     installGuard: "__bceCommentExporterV1Installed",
   });
 
@@ -572,6 +572,7 @@
       pagesFetched,
       expectedReplyCount,
       actualReplyCount,
+      duplicateReplyCount: accumulator.duplicateCount,
     });
   }
 
@@ -592,14 +593,19 @@
   function createReplyAccumulator() {
     const repliesById = new Map();
     const order = [];
+    let duplicateCount = 0;
 
     return {
       get size() {
         return repliesById.size;
       },
 
+      get duplicateCount() {
+        return duplicateCount;
+      },
+
       addTree(reply) {
-        collectReplyTree(reply, repliesById, order);
+        duplicateCount += collectReplyTree(reply, repliesById, order);
       },
 
       values() {
@@ -609,23 +615,34 @@
   }
 
   function collectReplyTree(reply, repliesById, order) {
-    if (!reply || typeof reply !== "object") return;
+    if (!reply || typeof reply !== "object") return 0;
 
-    const id = getReplyId(reply);
-    if (id) {
-      if (!repliesById.has(id)) {
-        repliesById.set(id, reply);
-        order.push(id);
-      } else {
-        repliesById.set(id, mergeReply(repliesById.get(id), reply));
+    let duplicateCount = 0;
+    const stack = [reply];
+
+    while (stack.length > 0) {
+      const current = stack.pop();
+      if (!current || typeof current !== "object") continue;
+
+      const id = getReplyId(current);
+      if (id) {
+        if (!repliesById.has(id)) {
+          repliesById.set(id, current);
+          order.push(id);
+        } else {
+          duplicateCount += 1;
+          repliesById.set(id, mergeReply(repliesById.get(id), current));
+        }
+      }
+
+      if (Array.isArray(current.replies)) {
+        for (let index = current.replies.length - 1; index >= 0; index -= 1) {
+          stack.push(current.replies[index]);
+        }
       }
     }
 
-    if (Array.isArray(reply.replies)) {
-      for (const child of reply.replies) {
-        collectReplyTree(child, repliesById, order);
-      }
-    }
+    return duplicateCount;
   }
 
   function mergeReply(existing, incoming) {
@@ -716,6 +733,7 @@
     pagesFetched,
     expectedReplyCount,
     actualReplyCount,
+    duplicateReplyCount,
   }) {
     return {
       exporter: {
@@ -729,6 +747,7 @@
         pagesFetched,
         expectedReplyCount,
         actualReplyCount,
+        duplicateReplyCount: toNonNegativeInt(duplicateReplyCount),
       },
       source: {
         title: getVideoTitle(),
@@ -813,8 +832,8 @@
     output.push("", "## 阅读说明", "");
     output.push("- 评论按时间顺序平铺，不使用深层缩进。");
     output.push("- 每条评论使用导出内唯一编号，例如 `[0007]`。");
-    output.push("- “回复”精确指向具体父评论；支持同页锚点的阅读器可直接点击跳转。");
-    output.push("- “直接回复”提供反向索引；高分叉节点的完整子列表放在文末。");
+    output.push("- “回复”表示接口明确给出的 `parent`；“推断回复”表示 `parent` 缺失时依据 `root` 补全。");
+    output.push("- 回复关系异常不会丢弃评论；异常节点会单独进入文末索引。");
 
     output.push("", "## 根评论", "");
     appendReplyMarkdown(output, graph.rootNode, graph);
@@ -827,6 +846,7 @@
     }
 
     appendMissingParentIndex(output, graph);
+    appendRelationIssueIndex(output, graph);
     appendLargeChildrenIndexes(output, graph);
     output.push("", `_Exported by Bilibili Comment Thread Exporter ${META.version}_`);
     return output.join("\n");
@@ -849,7 +869,11 @@
     lines.push(`- 导出时间：${formatTime(Date.now() / 1000)}`);
     const expected = thread.exporter.expectedReplyCount;
     lines.push(`- 回复数：${thread.exporter.actualReplyCount}` + (expected > 0 ? ` / ${expected}` : ""));
-    lines.push(`- 缺失父消息：${graph.missingParents.length}`);
+    lines.push(`- 关系完整度：${graph.integrity.explicitResolved} / ${graph.integrity.total}（明确 parent 可解析）`);
+    lines.push(`- 推断关系：${graph.integrity.inferred}`);
+    lines.push(`- 缺失父消息：${graph.missingParents.length}（涉及 ${graph.integrity.missing} 条回复）`);
+    lines.push(`- 异常关系：${graph.integrity.abnormal}`);
+    lines.push(`- 重复 rpid：${toNonNegativeInt(thread.exporter.duplicateReplyCount)}`);
 
     if (!thread.exporter.complete) {
       lines.push("- 注意：接口分页提前结束、重复或达到上限，导出结果可能不完整");
@@ -867,7 +891,8 @@
         const leftTime = Number(left.reply?.time?.ctime) || 0;
         const rightTime = Number(right.reply?.time?.ctime) || 0;
         if (leftTime !== rightTime) return leftTime - rightTime;
-        return left.originalIndex - right.originalIndex;
+        if (left.originalIndex !== right.originalIndex) return left.originalIndex - right.originalIndex;
+        return compareReplyIds(left.reply?.rpid, right.reply?.rpid);
       })
       .map((item) => item.reply);
 
@@ -878,48 +903,74 @@
     if (rootNode.id) nodeById.set(rootNode.id, rootNode);
     for (const node of replyNodes) if (node.id) nodeById.set(node.id, node);
 
-    const parentById = new Map();
-    const childrenById = new Map();
-    const missingChildrenByParent = new Map();
-
-    for (const node of replyNodes) {
-      const parentId = resolveEffectiveParentId(node.reply, rootId);
-      if (!parentId || parentId === node.id) continue;
-      parentById.set(node.id, parentId);
-
-      if (nodeById.has(parentId)) {
-        if (!childrenById.has(parentId)) childrenById.set(parentId, []);
-        childrenById.get(parentId).push(node);
-      } else {
-        if (!missingChildrenByParent.has(parentId)) missingChildrenByParent.set(parentId, []);
-        missingChildrenByParent.get(parentId).push(node);
-      }
-    }
-
-    for (const children of childrenById.values()) {
-      children.sort((left, right) => left.sequence - right.sequence);
-    }
-
     const graph = {
       rootId,
       rootNode,
       replyNodes,
       nodeById,
-      parentById,
-      childrenById,
-      missingChildrenByParent,
+      parentById: new Map(),
+      relationById: new Map(),
+      childrenById: new Map(),
+      missingChildrenByParent: new Map(),
+      issuesById: new Map(),
       missingParents: [],
+      pathSummaryById: new Map(),
+      parentExcerptById: new Map(),
+      integrity: null,
     };
 
-    rootNode.depth = 0;
-    for (const node of replyNodes) node.depth = computeThreadDepth(node, graph);
+    for (const node of replyNodes) {
+      const relation = resolveRelationDescriptor(node.reply, rootId);
+      graph.relationById.set(node.id, relation);
 
-    graph.missingParents = Array.from(missingChildrenByParent, ([parentId, children]) => ({
+      if (relation.declaredRoot && rootId && relation.declaredRoot !== rootId) {
+        addRelationIssue(graph, node.id, "cross-root");
+      }
+
+      if (!relation.parentId) continue;
+      graph.parentById.set(node.id, relation.parentId);
+
+      if (relation.parentId === node.id) {
+        addRelationIssue(graph, node.id, "self-cycle");
+        continue;
+      }
+
+      if (nodeById.has(relation.parentId)) {
+        if (!graph.childrenById.has(relation.parentId)) graph.childrenById.set(relation.parentId, []);
+        graph.childrenById.get(relation.parentId).push(node);
+      } else {
+        if (!graph.missingChildrenByParent.has(relation.parentId)) graph.missingChildrenByParent.set(relation.parentId, []);
+        graph.missingChildrenByParent.get(relation.parentId).push(node);
+      }
+    }
+
+    for (const children of graph.childrenById.values()) {
+      children.sort((left, right) => left.sequence - right.sequence);
+    }
+
+    analyzeDepthsAndCycles(graph);
+    detectTemporalAnomalies(graph);
+    buildPathSummaries(graph);
+
+    graph.missingParents = Array.from(graph.missingChildrenByParent, ([parentId, children]) => ({
       parentId,
       children: [...children].sort((left, right) => left.sequence - right.sequence),
     })).sort((left, right) => (left.children[0]?.sequence || 0) - (right.children[0]?.sequence || 0));
 
+    graph.integrity = buildRelationIntegrity(graph);
     return graph;
+  }
+
+  function compareReplyIds(leftValue, rightValue) {
+    const left = String(leftValue || "");
+    const right = String(rightValue || "");
+    const leftNumber = Number(left);
+    const rightNumber = Number(right);
+
+    if (Number.isSafeInteger(leftNumber) && Number.isSafeInteger(rightNumber) && leftNumber !== rightNumber) {
+      return leftNumber - rightNumber;
+    }
+    return left.localeCompare(right);
   }
 
   function createThreadNode(reply, sequence, width, isRoot) {
@@ -935,14 +986,21 @@
     };
   }
 
-  function resolveEffectiveParentId(reply, rootId) {
+  function resolveRelationDescriptor(reply, rootId) {
+    const selfId = String(reply?.rpid || "");
     const explicitParent = normalizeRelationId(reply?.parent);
-    if (explicitParent) return explicitParent;
-
     const declaredRoot = normalizeRelationId(reply?.root);
-    if (declaredRoot && declaredRoot !== String(reply?.rpid || "")) return declaredRoot;
-    if (rootId && rootId !== String(reply?.rpid || "")) return rootId;
-    return "";
+
+    if (explicitParent) {
+      return { parentId: explicitParent, source: "explicit", declaredRoot };
+    }
+    if (declaredRoot && declaredRoot !== selfId) {
+      return { parentId: declaredRoot, source: "root", declaredRoot };
+    }
+    if (rootId && rootId !== selfId) {
+      return { parentId: rootId, source: "thread-root", declaredRoot };
+    }
+    return { parentId: "", source: "unknown", declaredRoot };
   }
 
   function normalizeRelationId(value) {
@@ -950,27 +1008,146 @@
     return !id || id === "0" ? "" : id;
   }
 
-  function computeThreadDepth(node, graph) {
-    if (node.isRoot) return 0;
+  function addRelationIssue(graph, nodeId, issue) {
+    if (!nodeId || !issue) return;
+    if (!graph.issuesById.has(nodeId)) graph.issuesById.set(nodeId, new Set());
+    graph.issuesById.get(nodeId).add(issue);
+  }
 
-    const seen = new Set([node.id]);
-    let currentId = node.id;
-    let depth = 0;
+  function analyzeDepthsAndCycles(graph) {
+    const depthById = new Map();
+    if (graph.rootId) depthById.set(graph.rootId, 0);
 
-    while (currentId) {
-      const parentId = graph.parentById.get(currentId);
-      if (!parentId || !graph.nodeById.has(parentId)) return null;
-      if (seen.has(parentId)) return null;
+    for (const node of graph.replyNodes) {
+      if (depthById.has(node.id)) continue;
 
-      depth += 1;
-      if (parentId === graph.rootId) return depth;
+      const path = [];
+      const indexById = new Map();
+      let currentId = node.id;
+      let baseDepth = null;
+      let cycleStart = -1;
 
-      seen.add(parentId);
-      currentId = parentId;
-      if (depth > graph.nodeById.size) return null;
+      while (currentId) {
+        if (depthById.has(currentId)) {
+          baseDepth = depthById.get(currentId);
+          break;
+        }
+        if (indexById.has(currentId)) {
+          cycleStart = indexById.get(currentId);
+          break;
+        }
+
+        indexById.set(currentId, path.length);
+        path.push(currentId);
+
+        const parentId = graph.parentById.get(currentId);
+        if (!parentId || !graph.nodeById.has(parentId)) {
+          baseDepth = null;
+          break;
+        }
+        currentId = parentId;
+      }
+
+      if (cycleStart >= 0) {
+        for (const cycleId of path.slice(cycleStart)) addRelationIssue(graph, cycleId, "cycle");
+        for (const pathId of path) depthById.set(pathId, null);
+        continue;
+      }
+
+      let depth = baseDepth;
+      for (let index = path.length - 1; index >= 0; index -= 1) {
+        if (depth == null) {
+          depthById.set(path[index], null);
+        } else {
+          depth += 1;
+          depthById.set(path[index], depth);
+        }
+      }
     }
 
-    return null;
+    graph.rootNode.depth = 0;
+    for (const node of graph.replyNodes) {
+      node.depth = depthById.get(node.id) ?? null;
+    }
+  }
+
+  function detectTemporalAnomalies(graph) {
+    for (const node of graph.replyNodes) {
+      const parentId = graph.parentById.get(node.id);
+      const parentNode = parentId ? graph.nodeById.get(parentId) : null;
+      if (!parentNode) continue;
+
+      const childTime = Number(node.reply?.time?.ctime) || 0;
+      const parentTime = Number(parentNode.reply?.time?.ctime) || 0;
+      if (childTime > 0 && parentTime > 0 && childTime < parentTime) {
+        addRelationIssue(graph, node.id, "time-reversal");
+      }
+    }
+  }
+
+  function buildPathSummaries(graph) {
+    if (!graph.rootId) return;
+
+    graph.pathSummaryById.set(graph.rootId, {
+      length: 1,
+      first: graph.rootId,
+      tail: [graph.rootId],
+      full: [graph.rootId],
+    });
+
+    const buckets = new Map();
+    let maxDepth = 0;
+    for (const node of graph.replyNodes) {
+      if (node.depth == null || node.depth < 1) continue;
+      if (!buckets.has(node.depth)) buckets.set(node.depth, []);
+      buckets.get(node.depth).push(node);
+      if (node.depth > maxDepth) maxDepth = node.depth;
+    }
+
+    for (let depth = 1; depth <= maxDepth; depth += 1) {
+      for (const node of buckets.get(depth) || []) {
+        const parentId = graph.parentById.get(node.id);
+        const parentSummary = parentId ? graph.pathSummaryById.get(parentId) : null;
+        if (!parentSummary) continue;
+
+        const length = parentSummary.length + 1;
+        const full = length <= CONFIG.breadcrumbMaxSegments && parentSummary.full
+          ? [...parentSummary.full, node.id]
+          : null;
+        const tail = [...parentSummary.tail, node.id].slice(-3);
+
+        graph.pathSummaryById.set(node.id, {
+          length,
+          first: parentSummary.first,
+          tail,
+          full,
+        });
+      }
+    }
+  }
+
+  function buildRelationIntegrity(graph) {
+    const summary = {
+      total: graph.replyNodes.length,
+      explicitResolved: 0,
+      inferred: 0,
+      missing: 0,
+      unknown: 0,
+      abnormal: 0,
+    };
+
+    for (const node of graph.replyNodes) {
+      const relation = graph.relationById.get(node.id);
+      const parentResolved = Boolean(relation?.parentId && graph.nodeById.has(relation.parentId));
+
+      if (!relation?.parentId) summary.unknown += 1;
+      if (relation?.parentId && !parentResolved) summary.missing += 1;
+      if (relation?.source === "explicit" && parentResolved) summary.explicitResolved += 1;
+      if ((relation?.source === "root" || relation?.source === "thread-root") && parentResolved) summary.inferred += 1;
+      if ((graph.issuesById.get(node.id)?.size || 0) > 0) summary.abnormal += 1;
+    }
+
+    return summary;
   }
 
   function appendReplyMarkdown(lines, node, graph) {
@@ -1007,21 +1184,45 @@
       return;
     }
 
-    const parentId = graph.parentById.get(node.id);
-    if (!parentId) {
-      lines.push("> 回复对象：未知");
+    const relation = graph.relationById.get(node.id);
+    const issues = graph.issuesById.get(node.id) || new Set();
+
+    if (issues.has("self-cycle") || issues.has("cycle")) {
+      lines.push(`> 回复关系异常：检测到循环引用，原 parent 为 \`${escapeMarkdown(relation?.parentId || "")}\``);
+      appendRelationWarnings(lines, node, graph);
       return;
     }
 
-    const parentNode = graph.nodeById.get(parentId);
+    if (!relation?.parentId) {
+      lines.push("> 回复对象：未知");
+      appendRelationWarnings(lines, node, graph);
+      return;
+    }
+
+    const parentNode = graph.nodeById.get(relation.parentId);
     if (!parentNode) {
-      lines.push(`> 回复父消息：\`rpid ${escapeMarkdown(parentId)}\`（未获取到、已删除或未包含在本次导出中）`);
+      const prefix = relation.source === "explicit" ? "回复父消息" : "推断父消息";
+      lines.push(`> ${prefix}：\`rpid ${escapeMarkdown(relation.parentId)}\`（未获取到、已删除或未包含在本次导出中）`);
+      appendRelationWarnings(lines, node, graph);
       return;
     }
 
     const parentName = parentNode.reply.user?.name || `mid:${parentNode.reply.user?.mid || "unknown"}`;
-    const excerpt = makeParentExcerpt(parentNode.reply.message);
-    lines.push(`> 回复 [${parentNode.label}](#${parentNode.anchor}) ${escapeMarkdown(parentName)}` + (excerpt ? `：「${excerpt}」` : ""));
+    const excerpt = getParentExcerpt(parentNode, graph);
+    const prefix = relation.source === "explicit" ? "回复" : "推断回复";
+    const suffix = relation.source === "explicit" ? "" : "（parent 缺失，依据 root）";
+    lines.push(`> ${prefix} [${parentNode.label}](#${parentNode.anchor}) ${escapeMarkdown(parentName)}` + (excerpt ? `：「${excerpt}」` : "") + suffix);
+    appendRelationWarnings(lines, node, graph);
+  }
+
+  function appendRelationWarnings(lines, node, graph) {
+    const issues = graph.issuesById.get(node.id);
+    if (!issues || issues.size === 0) return;
+
+    const warnings = [];
+    if (issues.has("cross-root")) warnings.push("声明 root 与当前楼层根评论不一致");
+    if (issues.has("time-reversal")) warnings.push("子评论时间早于父评论");
+    if (warnings.length > 0) lines.push(`> 关系警告：${warnings.join("；")}`);
   }
 
   function appendChildrenRelation(lines, node, graph) {
@@ -1041,42 +1242,41 @@
     lines.push(`> 直接回复（${children.length}）：${preview.join("；")}；另有 ${children.length - CONFIG.childPreviewLimit} 条，见 [完整索引](#children-${node.label})`);
   }
 
-  function makeParentExcerpt(message) {
-    const compact = String(message || "").replace(/\s+/g, " ").trim();
-    if (!compact) return "";
+  function getParentExcerpt(parentNode, graph) {
+    if (graph.parentExcerptById.has(parentNode.id)) return graph.parentExcerptById.get(parentNode.id);
+
+    const compact = String(parentNode.reply?.message || "").replace(/\s+/g, " ").trim();
+    if (!compact) {
+      graph.parentExcerptById.set(parentNode.id, "");
+      return "";
+    }
 
     const chars = Array.from(compact);
-    const shortened = chars.length > CONFIG.parentExcerptLength
-      ? chars.slice(0, CONFIG.parentExcerptLength).join("") + "…"
-      : compact;
-    return escapeMarkdown(shortened);
+    const excerpt = escapeMarkdown(
+      chars.length > CONFIG.parentExcerptLength
+        ? chars.slice(0, CONFIG.parentExcerptLength).join("") + "…"
+        : compact
+    );
+    graph.parentExcerptById.set(parentNode.id, excerpt);
+    return excerpt;
   }
 
   function buildBreadcrumb(node, graph) {
     if (node.isRoot || node.depth == null || node.depth < 2) return "";
 
-    const chain = [];
-    const seen = new Set();
-    let currentId = node.id;
+    const summary = graph.pathSummaryById.get(node.id);
+    if (!summary || summary.length < 2) return "";
 
-    while (currentId && !seen.has(currentId)) {
-      seen.add(currentId);
-      const currentNode = graph.nodeById.get(currentId);
-      if (!currentNode) break;
-      chain.push(currentNode);
-      if (currentNode.isRoot) break;
+    const linkById = (id) => {
+      const target = graph.nodeById.get(id);
+      return target ? `[${target.label}](#${target.anchor})` : "";
+    };
 
-      const parentId = graph.parentById.get(currentId);
-      if (!parentId || !graph.nodeById.has(parentId)) break;
-      currentId = parentId;
-    }
+    if (summary.full) return summary.full.map(linkById).filter(Boolean).join(" → ");
 
-    chain.reverse();
-    if (chain.length < 2) return "";
-    const link = (item) => `[${item.label}](#${item.anchor})`;
-
-    if (chain.length <= CONFIG.breadcrumbMaxSegments) return chain.map(link).join(" → ");
-    return [link(chain[0]), "…", ...chain.slice(-3).map(link)].join(" → ");
+    const first = linkById(summary.first);
+    const tail = summary.tail.map(linkById).filter(Boolean);
+    return [first, "…", ...tail].filter(Boolean).join(" → ");
   }
 
   function appendMissingParentIndex(lines, graph) {
@@ -1091,6 +1291,22 @@
         return `[${child.label}](#${child.anchor}) ${escapeMarkdown(name)}`;
       });
       lines.push(`- 父 rpid \`${escapeMarkdown(group.parentId)}\` → ${children.join("；")}`);
+    }
+  }
+
+  function appendRelationIssueIndex(lines, graph) {
+    const abnormalNodes = graph.replyNodes.filter((node) => (graph.issuesById.get(node.id)?.size || 0) > 0);
+    if (abnormalNodes.length === 0) return;
+
+    lines.push("", "## 关系异常索引", "");
+    for (const node of abnormalNodes) {
+      const issues = graph.issuesById.get(node.id) || new Set();
+      const labels = [];
+      if (issues.has("self-cycle")) labels.push("自引用");
+      if (issues.has("cycle") && !issues.has("self-cycle")) labels.push("循环引用");
+      if (issues.has("cross-root")) labels.push("跨楼层 root");
+      if (issues.has("time-reversal")) labels.push("时间倒挂");
+      lines.push(`- [${node.label}](#${node.anchor}) ${escapeMarkdown(node.reply.user?.name || "未知用户")}：${labels.join("；")}`);
     }
   }
 

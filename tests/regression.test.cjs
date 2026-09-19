@@ -129,9 +129,9 @@ test('ProMax allows a reused XHR after an earlier blocked URL', () => {
   assert.equal(xhr.sent, 1);
 });
 
-test('exporter 1.0.3 keeps the event-driven architecture and no legacy scanners', () => {
+test('exporter 1.0.4 keeps the event-driven architecture and no legacy scanners', () => {
   const code = source('bilibili-comment-thread-exporter');
-  assert.match(code, /@version\s+1\.0\.3/);
+  assert.match(code, /@version\s+1\.0\.4/);
   assert.doesNotMatch(code, /function\s+patchFetch\b/);
   assert.doesNotMatch(code, /function\s+patchXhr\b/);
   assert.doesNotMatch(code, /function\s+observePage\b/);
@@ -139,7 +139,7 @@ test('exporter 1.0.3 keeps the event-driven architecture and no legacy scanners'
   assert.doesNotMatch(code, /function\s+ensureShell\b/);
 });
 
-test('exporter 1.0.3 is download-only and contains no clipboard path', () => {
+test('exporter 1.0.4 is download-only and contains no clipboard path', () => {
   const code = source('bilibili-comment-thread-exporter');
   assert.doesNotMatch(code, /导出本楼/);
   assert.doesNotMatch(code, /GM_setClipboard/);
@@ -331,7 +331,8 @@ test('exporter paginates, deduplicates and flattens replies', async () => {
     seedReply: reply('3', '2'),
   });
 
-  assert.equal(result.exporter.version, '1.0.3');
+  assert.equal(result.exporter.version, '1.0.4');
+  assert.equal(result.exporter.duplicateReplyCount, 1);
   assert.equal(result.exporter.complete, true);
   assert.equal(result.exporter.expectedReplyCount, 4);
   assert.equal(result.exporter.actualReplyCount, 4);
@@ -479,6 +480,200 @@ test('exporter graph keeps deep reply chains flat and precise', () => {
   assert.match(markdown, /回复 \[0006\]\(#msg-0006\) 用户6：「第五层」/);
   assert.match(markdown, /路径：\[0001\]\(#msg-0001\) → … → \[0005\]\(#msg-0005\) → \[0006\]\(#msg-0006\) → \[0007\]\(#msg-0007\)/);
   assert.doesNotMatch(markdown, /^ {4,}/m);
+});
+
+
+test('exporter 1.0.4 distinguishes explicit, inferred, missing and abnormal relations', () => {
+  const api = exporter({
+    document: { querySelector: () => null, title: '测试视频' },
+  });
+
+  const make = (id, parent, root = 1, ctime = 1000 + id) => api.normalizeReply({
+    rpid_str: String(id),
+    root,
+    parent,
+    ctime,
+    member: { mid: String(id), uname: `用户${id}` },
+    content: { message: `消息${id}` },
+  });
+
+  const thread = {
+    exporter: {
+      complete: true,
+      actualReplyCount: 5,
+      expectedReplyCount: 5,
+      duplicateReplyCount: 2,
+    },
+    source: {
+      title: '关系校验',
+      url: '',
+      bvid: '',
+      oid: '1',
+      rootRpid: '1',
+      selectedRpid: '2',
+    },
+    root: make(1, 0, 0, 1000),
+    replies: [
+      make(2, 1, 1, 1001),
+      make(3, 0, 1, 1002),
+      make(4, 999, 1, 1003),
+      make(5, 5, 1, 1004),
+      make(6, 1, 777, 999),
+    ],
+  };
+
+  const graph = api.buildThreadGraph(thread);
+  const markdown = api.formatThreadMarkdown(thread);
+
+  assert.equal(graph.integrity.total, 5);
+  assert.equal(graph.integrity.explicitResolved, 2);
+  assert.equal(graph.integrity.inferred, 1);
+  assert.equal(graph.integrity.missing, 1);
+  assert.equal(graph.integrity.abnormal, 2);
+
+  assert.equal(graph.relationById.get('2').source, 'explicit');
+  assert.equal(graph.relationById.get('3').source, 'root');
+  assert.equal(graph.relationById.get('4').source, 'explicit');
+
+  assert.ok(graph.issuesById.get('5').has('self-cycle'));
+  assert.ok(graph.issuesById.get('6').has('cross-root'));
+  assert.ok(graph.issuesById.get('6').has('time-reversal'));
+
+  assert.match(markdown, /关系完整度：2 \/ 5/);
+  assert.match(markdown, /推断关系：1/);
+  assert.match(markdown, /缺失父消息：1（涉及 1 条回复）/);
+  assert.match(markdown, /异常关系：2/);
+  assert.match(markdown, /重复 rpid：2/);
+  assert.match(markdown, /推断回复 \[0003\]\(#msg-0003\)/);
+  assert.match(markdown, /关系异常索引/);
+});
+
+test('exporter 1.0.4 detects multi-node cycles without recursion', () => {
+  const api = exporter({
+    document: { querySelector: () => null, title: '测试视频' },
+  });
+
+  const make = (id, parent) => api.normalizeReply({
+    rpid_str: String(id),
+    root: 1,
+    parent,
+    ctime: 1000 + id,
+    member: { mid: String(id), uname: `用户${id}` },
+    content: { message: `消息${id}` },
+  });
+
+  const graph = api.buildThreadGraph({
+    exporter: { complete: true, actualReplyCount: 3, expectedReplyCount: 3 },
+    source: { title: '环', url: '', bvid: '', oid: '1', rootRpid: '1', selectedRpid: '2' },
+    root: api.normalizeReply({
+      rpid_str: '1',
+      root: 0,
+      parent: 0,
+      ctime: 999,
+      member: { mid: '1', uname: '根' },
+      content: { message: '根' },
+    }),
+    replies: [
+      make(2, 3),
+      make(3, 4),
+      make(4, 2),
+    ],
+  });
+
+  assert.equal(graph.nodeById.get('2').depth, null);
+  assert.equal(graph.nodeById.get('3').depth, null);
+  assert.equal(graph.nodeById.get('4').depth, null);
+  assert.ok(graph.issuesById.get('2').has('cycle'));
+  assert.ok(graph.issuesById.get('3').has('cycle'));
+  assert.ok(graph.issuesById.get('4').has('cycle'));
+  assert.equal(graph.integrity.abnormal, 3);
+});
+
+test('exporter 1.0.4 handles a 1000-level chain with bounded breadcrumbs', () => {
+  const api = exporter({
+    document: { querySelector: () => null, title: '测试视频' },
+  });
+
+  const root = api.normalizeReply({
+    rpid_str: '1',
+    root: 0,
+    parent: 0,
+    ctime: 1000,
+    member: { mid: '1', uname: '根' },
+    content: { message: '根' },
+  });
+
+  const replies = [];
+  for (let id = 2; id <= 1001; id += 1) {
+    replies.push(api.normalizeReply({
+      rpid_str: String(id),
+      root: 1,
+      parent: id - 1,
+      ctime: 1000 + id,
+      member: { mid: String(id), uname: `用户${id}` },
+      content: { message: `消息${id}` },
+    }));
+  }
+
+  const thread = {
+    exporter: { complete: true, actualReplyCount: 1000, expectedReplyCount: 1000 },
+    source: { title: '千层深链', url: '', bvid: '', oid: '1', rootRpid: '1', selectedRpid: '1001' },
+    root,
+    replies,
+  };
+
+  const graph = api.buildThreadGraph(thread);
+  const markdown = api.formatThreadMarkdown(thread);
+  const deepest = graph.nodeById.get('1001');
+
+  assert.equal(deepest.depth, 1000);
+  assert.equal(graph.integrity.explicitResolved, 1000);
+  assert.equal(graph.integrity.abnormal, 0);
+  assert.match(markdown, /路径：\[0001\]\(#msg-0001\) → … → \[0999\]\(#msg-0999\) → \[1000\]\(#msg-1000\) → \[1001\]\(#msg-1001\)/);
+  assert.doesNotMatch(markdown, /^ {4,}/m);
+});
+
+test('exporter 1.0.4 keeps a 500-reply fanout bounded in the main body', () => {
+  const api = exporter({
+    document: { querySelector: () => null, title: '测试视频' },
+  });
+
+  const root = api.normalizeReply({
+    rpid_str: '1',
+    root: 0,
+    parent: 0,
+    ctime: 1000,
+    member: { mid: '1', uname: '根' },
+    content: { message: '根' },
+  });
+
+  const replies = [];
+  for (let id = 2; id <= 501; id += 1) {
+    replies.push(api.normalizeReply({
+      rpid_str: String(id),
+      root: 1,
+      parent: 1,
+      ctime: 1000 + id,
+      member: { mid: String(id), uname: `用户${id}` },
+      content: { message: `消息${id}` },
+    }));
+  }
+
+  const thread = {
+    exporter: { complete: true, actualReplyCount: 500, expectedReplyCount: 500 },
+    source: { title: '大分叉', url: '', bvid: '', oid: '1', rootRpid: '1', selectedRpid: '1' },
+    root,
+    replies,
+  };
+
+  const graph = api.buildThreadGraph(thread);
+  const markdown = api.formatThreadMarkdown(thread);
+
+  assert.equal(graph.childrenById.get('1').length, 500);
+  assert.equal(graph.integrity.explicitResolved, 500);
+  assert.match(markdown, /直接回复（500）：/);
+  assert.match(markdown, /另有 488 条，见 \[完整索引\]\(#children-0001\)/);
+  assert.match(markdown, /### \[0001\] 的直接回复（500）/);
 });
 
 test('starting a new export task cancels and aborts the previous task', () => {

@@ -2,11 +2,11 @@
 // @name         Bilibili Comment Thread Exporter
 // @name:zh-CN   B站评论楼层导出器
 // @namespace    https://space.bilibili.com/1937432404
-// @version      0.5.3
+// @version      0.5.4
 // @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/bilibili-comment-thread-exporter.user.js
 // @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/bilibili-comment-thread-exporter.user.js
-// @description  Add lightweight page controls to export one Bilibili comment thread as Markdown or JSON.
-// @description:zh-CN 给 B 站评论区增加楼层导出、点赞数和三点菜单快捷导出，把指定楼层整理成 Markdown 或 JSON。
+// @description  Export one Bilibili comment thread from the native three-dot comment menu as Markdown or JSON.
+// @description:zh-CN 在 B 站评论三点菜单中增加“导出本楼”，并保留点赞数，把指定楼层整理成 Markdown 或 JSON。
 // @author       素晴
 // @match        https://www.bilibili.com/video/*
 // @connect      api.bilibili.com
@@ -20,7 +20,7 @@
   "use strict";
 
   const SCRIPT_ID = "bce-thread-exporter";
-  const VERSION = "0.5.3";
+  const VERSION = "0.5.4";
   const COMMENT_TYPE_VIDEO = 1;
   const REPLY_PAGE_SIZE = 20;
   const MAX_REPLY_PAGES = 250;
@@ -50,7 +50,7 @@
     installNetworkObservers();
     onReady(() => {
       injectStyles();
-      ensureShell();
+      removeLegacyShell();
       installFullscreenTracking();
       observePage();
       installCommentMenuIntegration();
@@ -412,6 +412,12 @@
       }
     `;
     document.documentElement.appendChild(style);
+  }
+
+  function removeLegacyShell() {
+    document.getElementById(`${SCRIPT_ID}-shell`)?.remove();
+    state.shell = null;
+    state.panelOpen = false;
   }
 
   function ensureShell() {

@@ -6,7 +6,7 @@
 
 在安装了 Tampermonkey 的设备上打开下面的 Raw 地址即可安装：
 
-- [哔哩发评反诈 Pro](https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/bilibili-comment-anti-fraud-pro.user.js)
+- [BiliEcho](https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/biliecho.user.js)
 - [B站评论楼层导出器](https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/bilibili-comment-thread-exporter.user.js)
 - [B站直播自动最高/最低画质](https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/bilibili-live-auto-quality.user.js)
 - [BiliForge](https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/biliforge.user.js)
@@ -19,7 +19,7 @@
 
 ## 本次优化
 
-- 发评反诈 Pro **4.2.3**：支持 JSON 类型的 XHR 响应，复用请求对象时按当前地址判断；取消检测后不再启动匿名回退请求。已经在途的请求仍可能等待返回或超时。
+- BiliEcho **4.3.0**：由“哔哩发评反诈 Pro”正式更名。项目源自 freedom-introvert/biliSendCommAntifraud 的网页油猴脚本并持续重构，现支持风控降级、匿名回退、延迟复检、检测队列、取消、诊断报告与无限次重新检测。旧 Raw 路径暂时保留用于自动更新迁移。
 - 评论楼层导出器 **1.0.5**：在 1.0.4 的关系校验基础上压缩 Markdown 冗余。L1 直接回复不再重复根评论摘要，L2-L3 不再额外输出路径，L4 及以上继续保留压缩路径；父子编号、锚点、大分叉完整索引和异常关系索引保持不变。
 - 直播画质 **2.4.2**：菜单加载期间保留最新的前后台切换意图；没有可选画质时不触发播放器刷新。
 - BiliForge **3.2.0**：由 Make BiliBili Great Again ProMax 正式更名；保留原功能与兼容接口，并新增 `__BILIFORGE__` 运行时入口。旧 Raw 路径暂时保留用于自动更新迁移。

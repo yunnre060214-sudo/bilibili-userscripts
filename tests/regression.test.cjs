@@ -143,6 +143,32 @@ test('BiliForge allows a reused XHR after an earlier blocked URL', () => {
   assert.equal(xhr.sent, 1);
 });
 
+test('stable 1.0.0 release keeps all public and migration userscripts aligned', () => {
+  const primaryEcho = source('biliecho');
+  const legacyEcho = source('bilibili-comment-anti-fraud-pro');
+  const primaryForge = source('biliforge');
+  const legacyForge = source('make-bilibili-great-again-promax');
+  const exporterCode = source('bilibili-comment-thread-exporter');
+
+  for (const code of [primaryEcho, legacyEcho, primaryForge, legacyForge, exporterCode]) {
+    assert.equal(code.match(/^\/\/ @version\s+([^\s]+)$/m)?.[1], '1.0.0');
+  }
+
+  assert.equal(legacyEcho, primaryEcho);
+  assert.equal(legacyForge, primaryForge);
+  assert.match(primaryForge, /version:\s*'1\.0\.0'/);
+  assert.match(exporterCode, /version:\s*"1\.0\.0"/);
+});
+
+test('README declares all three stable products as 1.0.0', () => {
+  const readme = repoFile('README.md');
+
+  assert.match(readme, /BiliForge \*\*1\.0\.0\*\*/);
+  assert.match(readme, /BiliEcho \*\*1\.0\.0\*\*/);
+  assert.match(readme, /评论楼层导出器 \*\*1\.0\.0\*\*/);
+  assert.match(readme, /1\.0\.0 是三个脚本共同的首个正式稳定基线/);
+});
+
 test('README exporter version matches the userscript header', () => {
   const script = source('bilibili-comment-thread-exporter');
   const readme = repoFile('README.md');
@@ -156,9 +182,9 @@ test('README exporter version matches the userscript header', () => {
   assert.equal(readmeBulletVersion, scriptVersion);
 });
 
-test('exporter 1.0.5 keeps the event-driven architecture and no legacy scanners', () => {
+test('stable exporter keeps the event-driven architecture and no legacy scanners', () => {
   const code = source('bilibili-comment-thread-exporter');
-  assert.match(code, /@version\s+1\.0\.5/);
+  assert.match(code, /@version\s+1\.0\.0/);
   assert.doesNotMatch(code, /function\s+patchFetch\b/);
   assert.doesNotMatch(code, /function\s+patchXhr\b/);
   assert.doesNotMatch(code, /function\s+observePage\b/);
@@ -166,7 +192,7 @@ test('exporter 1.0.5 keeps the event-driven architecture and no legacy scanners'
   assert.doesNotMatch(code, /function\s+ensureShell\b/);
 });
 
-test('exporter 1.0.5 is download-only and contains no clipboard path', () => {
+test('stable exporter is download-only and contains no clipboard path', () => {
   const code = source('bilibili-comment-thread-exporter');
   assert.doesNotMatch(code, /导出本楼/);
   assert.doesNotMatch(code, /GM_setClipboard/);
@@ -358,7 +384,7 @@ test('exporter paginates, deduplicates and flattens replies', async () => {
     seedReply: reply('3', '2'),
   });
 
-  assert.equal(result.exporter.version, '1.0.5');
+  assert.equal(result.exporter.version, '1.0.0');
   assert.equal(result.exporter.duplicateReplyCount, 1);
   assert.equal(result.exporter.complete, true);
   assert.equal(result.exporter.expectedReplyCount, 4);
@@ -469,7 +495,7 @@ test('exporter Markdown includes likes, UID, IP location and reply target', () =
   assert.doesNotMatch(markdown, /schema v/i);
 });
 
-test('exporter 1.0.5 suppresses shallow redundancy but keeps deep navigation', () => {
+test('stable exporter suppresses shallow redundancy but keeps deep navigation', () => {
   const api = exporter({
     document: { querySelector: () => null, title: '测试视频' },
   });
@@ -554,7 +580,7 @@ test('exporter graph keeps deep reply chains flat and precise', () => {
 });
 
 
-test('exporter 1.0.4 distinguishes explicit, inferred, missing and abnormal relations', () => {
+test('exporter distinguishes explicit, inferred, missing and abnormal relations', () => {
   const api = exporter({
     document: { querySelector: () => null, title: '测试视频' },
   });
@@ -619,7 +645,7 @@ test('exporter 1.0.4 distinguishes explicit, inferred, missing and abnormal rela
   assert.match(markdown, /关系异常索引/);
 });
 
-test('exporter 1.0.4 detects multi-node cycles without recursion', () => {
+test('exporter detects multi-node cycles without recursion', () => {
   const api = exporter({
     document: { querySelector: () => null, title: '测试视频' },
   });
@@ -660,7 +686,7 @@ test('exporter 1.0.4 detects multi-node cycles without recursion', () => {
   assert.equal(graph.integrity.abnormal, 3);
 });
 
-test('exporter 1.0.4 handles a 1000-level chain with bounded breadcrumbs', () => {
+test('exporter handles a 1000-level chain with bounded breadcrumbs', () => {
   const api = exporter({
     document: { querySelector: () => null, title: '测试视频' },
   });
@@ -704,7 +730,7 @@ test('exporter 1.0.4 handles a 1000-level chain with bounded breadcrumbs', () =>
   assert.doesNotMatch(markdown, /^ {4,}/m);
 });
 
-test('exporter 1.0.4 keeps a 500-reply fanout bounded in the main body', () => {
+test('exporter keeps a 500-reply fanout bounded in the main body', () => {
   const api = exporter({
     document: { querySelector: () => null, title: '测试视频' },
   });
@@ -801,9 +827,9 @@ test('BiliEcho cancellation prevents fallback requests after fetch fails', async
   assert.equal(fallback, 0);
 });
 
-test('BiliForge 3.3.1 owns the live quality controller', () => {
+test('BiliForge 1.0.0 owns the live quality controller', () => {
   const code = source('biliforge');
-  assert.match(code, /@version\s+3\.3\.1/);
+  assert.match(code, /@version\s+1\.0\.0/);
   assert.match(code, /const LiveQualityController = \{/);
   assert.match(code, /const LiveFailureGuard = \{/);
   assert.match(code, /const LiveCDNOptimizer = \{/);

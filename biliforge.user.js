@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BiliForge
 // @namespace    https://space.bilibili.com/1937432404
-// @version      3.2.0
+// @version      3.3.0
 // @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/biliforge.user.js
 // @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/biliforge.user.js
 // @description  Bilibili 体验优化，去广告，URL 清理，P2P CDN 控制，直播优化，文章复制修复
@@ -94,7 +94,8 @@
             hevcPattern: /(\d+)_(mini|pro)hevc/g,
             mediaPattern: /\.(m3u8|m4s)(?:\?|$)/i,
             errorLimit: 5,
-            errorDecayMs: 10000
+            errorDecayMs: 10000,
+            recoveryMs: 30000
         }),
 
         trackers: Object.freeze({
@@ -1563,29 +1564,19 @@
         }
     };
 
-    const LiveOptimizer = {
+    const LiveCDNOptimizer = {
         initialized: false,
-        recentErrors: 0,
-        forceHighest: false,
-        decayTimer: null,
 
         init() {
-            if (!CONFIG.features.liveOptimizer) return;
-
-            StyleManager.initLive();
-
             if (this.initialized) return;
             this.initialized = true;
 
-            this.forceHighest = StorageManager.isTrue('forceHighestQuality');
+            W.disableMcdn = typeof W.disableMcdn === 'boolean' ? W.disableMcdn : true;
+            W.disableSmtcdns = typeof W.disableSmtcdns === 'boolean' ? W.disableSmtcdns : true;
+            W.forceHighestQuality = W.forceHighestQuality === true
+                || StorageManager.isTrue('forceHighestQuality');
 
-            W.disableMcdn = true;
-            W.disableSmtcdns = true;
-            W.forceHighestQuality = this.forceHighest;
-
-            this.startDecay();
-
-            NetworkManager.addRule('live-optimizer', (url) => {
+            NetworkManager.addRule('live-cdn-optimizer', (url) => {
                 if (!Router.isLive()) return null;
 
                 let current = url;
@@ -1602,8 +1593,9 @@
                     current = current.replace(CONFIG.live.smtcdnsPattern, '$1');
                 }
 
-                const shouldForceHighest = W.forceHighestQuality === true
-                    || StorageManager.isTrue('forceHighestQuality');
+                const shouldForceHighest = LiveFailureGuard.canAutoHigh()
+                    && (W.forceHighestQuality === true
+                        || StorageManager.isTrue('forceHighestQuality'));
 
                 if (shouldForceHighest && CONFIG.live.qualityPattern.test(current)) {
                     current = current
@@ -1613,19 +1605,43 @@
 
                 return current !== url ? current : null;
             });
+        }
+    };
 
-            NetworkManager.addFetchObserver('live-response-watch', (url, response, error) => {
+    const LiveFailureGuard = {
+        initialized: false,
+        recentErrors: 0,
+        lastErrorAt: 0,
+        tripped: false,
+        decayTimer: null,
+
+        init() {
+            if (this.initialized) return;
+            this.initialized = true;
+
+            NetworkManager.addFetchObserver('live-failure-guard', (url, response, error) => {
                 if (!Router.isLive()) return;
                 if (!CONFIG.live.mediaPattern.test(url)) return;
 
                 if (error || [403, 404].includes(response?.status)) {
-                    this.recentErrors++;
-                }
-
-                if (this.recentErrors >= CONFIG.live.errorLimit && W.forceHighestQuality) {
-                    this.disableForceHighest();
+                    this.recordFailure();
                 }
             });
+
+            this.startDecay();
+        },
+
+        recordFailure() {
+            this.recentErrors += 1;
+            this.lastErrorAt = Date.now();
+
+            if (this.recentErrors >= CONFIG.live.errorLimit) {
+                this.trip();
+            }
+        },
+
+        canAutoHigh() {
+            return !this.tripped;
         },
 
         startDecay() {
@@ -1635,20 +1651,30 @@
                 if (this.recentErrors > 0) {
                     this.recentErrors = Math.floor(this.recentErrors / 2);
                 }
+
+                if (
+                    this.tripped
+                    && this.recentErrors === 0
+                    && Date.now() - this.lastErrorAt >= CONFIG.live.recoveryMs
+                ) {
+                    this.recover();
+                }
             }, CONFIG.live.errorDecayMs);
         },
 
-        disableForceHighest() {
-            this.recentErrors = 0;
-            this.forceHighest = false;
+        trip() {
+            if (this.tripped) return;
+
+            this.tripped = true;
             W.forceHighestQuality = false;
             StorageManager.set('forceHighestQuality', false);
+            LiveQualityController.suppressHigh();
 
             try {
                 if (typeof GM_notification === 'function') {
                     GM_notification({
                         title: '最高清晰度可能不可用',
-                        text: '已自动切回播放器当前选择的清晰度。',
+                        text: '已暂停自动拉高画质，网络稳定后会自动恢复。',
                         timeout: 3000,
                         silent: true
                     });
@@ -1656,6 +1682,382 @@
             } catch (e) {
                 Logger.warn('notification failed', e);
             }
+        },
+
+        recover() {
+            if (!this.tripped) return;
+
+            this.tripped = false;
+            this.recentErrors = 0;
+            LiveQualityController.onFailureRecovery();
+            Logger.log('live quality auto-high recovered');
+        }
+    };
+
+    const LiveQualityController = {
+        initialized: false,
+        ready: false,
+        switching: false,
+        pendingSelection: null,
+        lastAction: null,
+        lastActionTime: 0,
+        initAttempts: 0,
+        operationId: 0,
+        pageFocused: true,
+        initTimer: null,
+
+        selectors: Object.freeze({
+            qualityWrap: '.quality-wrap',
+            qualityItems: '.quality-wrap .quality-item',
+            activeQuality: '.quality-wrap .quality-item.active',
+            refreshButton: Object.freeze([
+                '.bilibili-player-video-refresh, .video-refresh',
+                '[title*="刷新"]',
+                '[aria-label*="刷新"]'
+            ])
+        }),
+
+        qualityRanks: Object.freeze([
+            Object.freeze(['杜比', 30000]),
+            Object.freeze(['4K', 20000]),
+            Object.freeze(['2160P', 20000]),
+            Object.freeze(['2K', 15000]),
+            Object.freeze(['1440P', 15000]),
+            Object.freeze(['原画', 10000]),
+            Object.freeze(['蓝光', 400]),
+            Object.freeze(['1080P', 400]),
+            Object.freeze(['超清', 250]),
+            Object.freeze(['720P', 250]),
+            Object.freeze(['高清', 150]),
+            Object.freeze(['480P', 150]),
+            Object.freeze(['流畅', 80])
+        ]),
+
+        qualityAttrs: Object.freeze([
+            'data-qn',
+            'data-quality',
+            'data-value',
+            'data-key',
+            'qn',
+            'quality',
+            'value'
+        ]),
+
+        knownQn: new Set([80, 150, 250, 400, 10000, 15000, 20000, 30000]),
+        actionDebounceMs: 800,
+        menuRetryCount: 8,
+        menuRetryDelayMs: 150,
+        initIntervalMs: 1000,
+        initMaxAttempts: 120,
+
+        init() {
+            if (this.initialized) return;
+            this.initialized = true;
+
+            D.addEventListener('visibilitychange', () => {
+                if (D.hidden) this.handleHide();
+                else this.handleShow();
+            });
+
+            W.addEventListener('blur', () => {
+                this.pageFocused = false;
+                this.handleHide();
+            });
+
+            W.addEventListener('focus', () => {
+                this.pageFocused = true;
+                this.handleShow();
+            });
+
+            this.initTimer = setInterval(() => {
+                this.initAttempts += 1;
+                this.ensureInit();
+
+                if (this.ready) {
+                    this.sync(false);
+                    clearInterval(this.initTimer);
+                    this.initTimer = null;
+                } else if (this.initAttempts >= this.initMaxAttempts) {
+                    clearInterval(this.initTimer);
+                    this.initTimer = null;
+                }
+            }, this.initIntervalMs);
+
+            this.ensureInit();
+            if (this.ready) this.sync(false);
+        },
+
+        now() {
+            return Date.now();
+        },
+
+        normalizeText(text) {
+            return String(text || '').replace(/\s+/g, '').trim();
+        },
+
+        getElementText(el) {
+            return this.normalizeText(el && (el.innerText || el.textContent));
+        },
+
+        getItems() {
+            return SafeDOM.queryAll(this.selectors.qualityItems);
+        },
+
+        getCurrent() {
+            const active = SafeDOM.query(this.selectors.activeQuality);
+            return active ? this.getElementText(active) : null;
+        },
+
+        openMenu() {
+            const btn = SafeDOM.query(this.selectors.qualityWrap);
+            if (!btn) return false;
+
+            btn.click();
+            return true;
+        },
+
+        parseKnownQn(value) {
+            const text = this.normalizeText(value);
+            const match = text.match(/(?:^|[^\d])(30000|20000|15000|10000|400|250|150|80)(?:[^\d]|$)/);
+            if (!match) return null;
+
+            const qn = Number(match[1]);
+            return this.knownQn.has(qn) ? qn : null;
+        },
+
+        readAttributeQn(el) {
+            if (!el) return null;
+
+            if (el.dataset) {
+                for (const value of Object.values(el.dataset)) {
+                    const qn = this.parseKnownQn(value);
+                    if (qn) return qn;
+                }
+            }
+
+            if (typeof el.getAttribute === 'function') {
+                for (const attr of this.qualityAttrs) {
+                    const qn = this.parseKnownQn(el.getAttribute(attr));
+                    if (qn) return qn;
+                }
+            }
+
+            return null;
+        },
+
+        getQualityQn(el) {
+            const attrQn = this.readAttributeQn(el);
+            if (attrQn) return attrQn;
+
+            const text = this.getElementText(el);
+            const textQn = this.parseKnownQn(text);
+            if (textQn) return textQn;
+
+            for (const [keyword, qn] of this.qualityRanks) {
+                if (text.includes(keyword)) return qn;
+            }
+
+            return null;
+        },
+
+        getLowestItem(items) {
+            let bestItem = null;
+            let bestRank = Number.POSITIVE_INFINITY;
+
+            for (const item of items) {
+                const rank = this.getQualityQn(item);
+                if (!rank) continue;
+
+                if (rank < bestRank) {
+                    bestItem = item;
+                    bestRank = rank;
+                }
+            }
+
+            return bestItem || items[items.length - 1] || null;
+        },
+
+        getHighestItem(items) {
+            let bestItem = null;
+            let bestRank = Number.NEGATIVE_INFINITY;
+
+            for (const item of items) {
+                const rank = this.getQualityQn(item);
+                if (!rank) continue;
+
+                if (rank > bestRank) {
+                    bestItem = item;
+                    bestRank = rank;
+                }
+            }
+
+            return bestItem || items[0] || null;
+        },
+
+        waitForItems(callback, retries = this.menuRetryCount) {
+            const items = this.getItems();
+
+            if (items.length > 0 || retries <= 0) {
+                callback(items);
+                return;
+            }
+
+            setTimeout(
+                () => this.waitForItems(callback, retries - 1),
+                this.menuRetryDelayMs
+            );
+        },
+
+        shouldSkip(action) {
+            return this.lastAction === action
+                && this.now() - this.lastActionTime < this.actionDebounceMs;
+        },
+
+        markAction(action) {
+            this.lastAction = action;
+            this.lastActionTime = this.now();
+        },
+
+        clickPlayerRefresh() {
+            for (const selector of this.selectors.refreshButton) {
+                const refreshBtn = SafeDOM.query(selector);
+                if (refreshBtn) {
+                    refreshBtn.click();
+                    Logger.log('live player refreshed');
+                    return true;
+                }
+            }
+
+            Logger.log('live player refresh button not found');
+            return false;
+        },
+
+        ensureInit() {
+            if (this.ready) return;
+
+            const current = this.getCurrent();
+            if (!current) return;
+
+            this.ready = true;
+            Logger.log('live quality initialized:', current);
+        },
+
+        sync(refreshAfterSwitch) {
+            if (D.hidden || !this.pageFocused) {
+                this.switchToLow();
+            } else {
+                this.switchToHigh(refreshAfterSwitch);
+            }
+        },
+
+        selectQuality(mode, refreshAfterSwitch) {
+            if (mode === 'high' && !LiveFailureGuard.canAutoHigh()) return;
+
+            this.ensureInit();
+
+            if (this.switching) {
+                this.pendingSelection = { mode, refreshAfterSwitch };
+                return;
+            }
+
+            if (!this.ready || this.shouldSkip(mode)) return;
+
+            const currentOperation = ++this.operationId;
+            this.switching = true;
+            this.markAction(mode);
+
+            if (!this.openMenu()) {
+                this.switching = false;
+                Logger.warn('live quality menu not found');
+                return;
+            }
+
+            this.waitForItems((items) => {
+                if (currentOperation !== this.operationId) return;
+
+                if (this.pendingSelection) {
+                    mode = this.pendingSelection.mode;
+                    refreshAfterSwitch = this.pendingSelection.refreshAfterSwitch;
+                    this.pendingSelection = null;
+                    this.markAction(mode);
+                }
+
+                if (mode === 'high' && !LiveFailureGuard.canAutoHigh()) {
+                    this.switching = false;
+                    return;
+                }
+
+                const target = mode === 'low'
+                    ? this.getLowestItem(items)
+                    : this.getHighestItem(items);
+
+                if (target) {
+                    target.click();
+                    Logger.log(
+                        mode === 'low' ? 'live quality -> low:' : 'live quality -> high:',
+                        this.getElementText(target)
+                    );
+                } else {
+                    Logger.warn('live quality option not found');
+                }
+
+                if (target && refreshAfterSwitch) {
+                    setTimeout(() => {
+                        if (currentOperation === this.operationId) {
+                            this.clickPlayerRefresh();
+                        }
+                    }, 300);
+                }
+
+                this.switching = false;
+            });
+        },
+
+        switchToLow() {
+            this.selectQuality('low', false);
+        },
+
+        switchToHigh(refreshAfterSwitch = false) {
+            this.selectQuality('high', refreshAfterSwitch);
+        },
+
+        handleHide() {
+            this.switchToLow();
+        },
+
+        handleShow() {
+            this.switchToHigh(true);
+        },
+
+        suppressHigh() {
+            if (this.pendingSelection?.mode === 'high') {
+                this.pendingSelection = null;
+            }
+
+            this.operationId += 1;
+            this.switching = false;
+        },
+
+        onFailureRecovery() {
+            if (!Router.isLive() || D.hidden || !this.pageFocused) return;
+            this.switchToHigh(false);
+        }
+    };
+
+    const LiveOptimizer = {
+        initialized: false,
+
+        init() {
+            if (!CONFIG.features.liveOptimizer || !Router.isLive()) return;
+
+            StyleManager.initLive();
+
+            if (this.initialized) return;
+            this.initialized = true;
+
+            LiveCDNOptimizer.init();
+            LiveFailureGuard.init();
+            LiveQualityController.init();
         }
     };
 
@@ -1668,9 +2070,15 @@
             this.started = true;
 
             const api = {
-                version: '3.2.0',
+                version: '3.3.0',
                 config: CONFIG,
                 hooks: HookManager,
+                live: Object.freeze({
+                    optimizer: LiveOptimizer,
+                    cdn: LiveCDNOptimizer,
+                    quality: LiveQualityController,
+                    failureGuard: LiveFailureGuard
+                }),
                 restoreAll: () => HookManager.restoreAll(),
                 restore: (owner) => HookManager.restore(owner)
             };

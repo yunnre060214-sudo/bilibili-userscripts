@@ -8,7 +8,6 @@
 
 - [BiliEcho](https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/biliecho.user.js)
 - [B站评论楼层导出器](https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/bilibili-comment-thread-exporter.user.js)
-- [B站直播自动最高/最低画质](https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/bilibili-live-auto-quality.user.js)
 - [BiliForge](https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/biliforge.user.js)
 
 如果 Tampermonkey 安装页显示的版本落后于仓库，可改用目标提交 SHA 对应的 Raw 地址绕过缓存。
@@ -21,8 +20,7 @@
 
 - BiliEcho **4.3.0**：由“哔哩发评反诈 Pro”正式更名。项目源自 freedom-introvert/biliSendCommAntifraud 的网页油猴脚本并持续重构，现支持风控降级、匿名回退、延迟复检、检测队列、取消、诊断报告与无限次重新检测。旧 Raw 路径暂时保留用于自动更新迁移。
 - 评论楼层导出器 **1.0.5**：在 1.0.4 的关系校验基础上压缩 Markdown 冗余。L1 直接回复不再重复根评论摘要，L2-L3 不再额外输出路径，L4 及以上继续保留压缩路径；父子编号、锚点、大分叉完整索引和异常关系索引保持不变。
-- 直播画质 **2.4.2**：菜单加载期间保留最新的前后台切换意图；没有可选画质时不触发播放器刷新。
-- BiliForge **3.2.0**：由 Make BiliBili Great Again ProMax 正式更名；保留原功能与兼容接口，并新增 `__BILIFORGE__` 运行时入口。旧 Raw 路径暂时保留用于自动更新迁移。
+- BiliForge **3.3.0**：把原独立直播画质脚本完整并入主脚本，新增 `LiveCDNOptimizer`、`LiveQualityController` 与 `LiveFailureGuard`。直播前台自动最高、后台自动最低；网络连续失败时由 FailureGuard 暂停自动拉高，稳定后自动恢复，避免 UI 画质控制与网络层强制最高互相抢状态。旧 Make BiliBili Great Again ProMax Raw 路径继续作为更新迁移副本。
 
 ## 评论楼层导出器 1.0.5
 
@@ -54,4 +52,4 @@ node --test tests/regression.test.cjs
 node tests/browser-smoke.cjs
 ```
 
-浏览器联测使用本地拦截的页面和接口数据，覆盖四脚本共同加载、原生评论三点菜单注入、Markdown 文件下载、分页去重、关系图渲染、原生 JSON XHR、请求拦截和画质切换。不会连接真实评论接口或发布评论；不能替代真实 B 站页面、账号风控、会员画质及 Tampermonkey 沙箱的端到端验证。
+浏览器联测使用本地拦截的页面和接口数据，覆盖三个用户脚本共同加载、BiliForge 集成直播画质控制、原生评论三点菜单注入、Markdown 文件下载、分页去重、关系图渲染、原生 JSON XHR、请求拦截和画质切换。不会连接真实评论接口或发布评论；不能替代真实 B 站页面、账号风控、会员画质及 Tampermonkey 沙箱的端到端验证。

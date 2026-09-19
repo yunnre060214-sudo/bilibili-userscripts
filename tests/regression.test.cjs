@@ -64,6 +64,19 @@ function network(extra = {}) {
   );
 }
 
+function liveQuality(extra = {}) {
+  return load(
+    'biliforge',
+    '    App.init();',
+    `    globalThis.api = {
+      quality: LiveQualityController,
+      failureGuard: LiveFailureGuard,
+      cdn: LiveCDNOptimizer,
+    };`,
+    extra
+  );
+}
+
 function exporter(extra = {}) {
   return load(
     'bilibili-comment-thread-exporter',
@@ -788,7 +801,30 @@ test('BiliEcho cancellation prevents fallback requests after fetch fails', async
   assert.equal(fallback, 0);
 });
 
-test('live quality applies latest visibility request during menu loading', () => {
+test('BiliForge 3.3.0 owns the live quality controller', () => {
+  const code = source('biliforge');
+  assert.match(code, /@version\s+3\.3\.0/);
+  assert.match(code, /const LiveQualityController = \{/);
+  assert.match(code, /const LiveFailureGuard = \{/);
+  assert.match(code, /const LiveCDNOptimizer = \{/);
+  assert.equal(
+    fs.existsSync(path.join(__dirname, '..', 'bilibili-live-auto-quality.user.js')),
+    false
+  );
+});
+
+test('README BiliForge version matches the userscript header', () => {
+  const script = source('biliforge');
+  const readme = repoFile('README.md');
+
+  const scriptVersion = script.match(/^\/\/ @version\s+([^\s]+)$/m)?.[1];
+  const readmeVersion = readme.match(/^- BiliForge \*\*([^*]+)\*\*：/m)?.[1];
+
+  assert.ok(scriptVersion, 'missing BiliForge @version');
+  assert.equal(readmeVersion, scriptVersion);
+});
+
+test('BiliForge live quality applies the latest visibility request during menu loading', () => {
   const pending = [];
   const clicks = [];
   const item = (text, rank) => ({
@@ -801,21 +837,48 @@ test('live quality applies latest visibility request during menu loading', () =>
   const high = item('原画', '10000');
   const low = item('流畅', '80');
   const doc = {
+    hidden: false,
     querySelector: selector => selector.includes('.active') ? high : { click() {} },
     querySelectorAll: () => items,
   };
 
-  const api = load(
-    'bilibili-live-auto-quality',
-    "    document.addEventListener('visibilitychange', () => {",
-    "    globalThis.api = { selectQuality }; return; document.addEventListener('visibilitychange', () => {",
-    { document: doc, setTimeout: fn => pending.push(fn) }
-  );
+  const api = liveQuality({
+    document: doc,
+    setTimeout: fn => pending.push(fn),
+  });
 
-  api.selectQuality('low', false);
-  api.selectQuality('high', false);
+  api.quality.selectQuality('low', false);
+  api.quality.selectQuality('high', false);
   items = [high, low];
   while (pending.length) pending.shift()();
 
   assert.equal(clicks.at(-1), '原画');
+});
+
+test('BiliForge FailureGuard blocks auto-high after repeated live failures', () => {
+  const clicks = [];
+  const high = {
+    textContent: '原画',
+    dataset: { qn: '10000' },
+    getAttribute: () => null,
+    click: () => clicks.push('原画'),
+  };
+  const low = {
+    textContent: '流畅',
+    dataset: { qn: '80' },
+    getAttribute: () => null,
+    click: () => clicks.push('流畅'),
+  };
+  const doc = {
+    hidden: false,
+    querySelector: selector => selector.includes('.active') ? low : { click() {} },
+    querySelectorAll: () => [high, low],
+  };
+  const api = liveQuality({ document: doc });
+
+  api.failureGuard.trip();
+  api.quality.selectQuality('high', false);
+
+  assert.equal(api.failureGuard.canAutoHigh(), false);
+  assert.deepEqual(clicks, []);
 });

@@ -2,7 +2,7 @@
 // @name         Bilibili Comment Thread Exporter
 // @name:zh-CN   B站评论楼层导出器
 // @namespace    https://space.bilibili.com/1937432404
-// @version      0.5.1
+// @version      0.5.2
 // @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/bilibili-comment-thread-exporter.user.js
 // @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/bilibili-comment-thread-exporter.user.js
 // @description  Add lightweight page controls to export one Bilibili comment thread as Markdown or JSON.
@@ -20,7 +20,7 @@
   "use strict";
 
   const SCRIPT_ID = "bce-thread-exporter";
-  const VERSION = "0.5.1";
+  const VERSION = "0.5.2";
   const COMMENT_TYPE_VIDEO = 1;
   const REPLY_PAGE_SIZE = 20;
   const MAX_REPLY_PAGES = 250;
@@ -953,51 +953,18 @@
     const root = menuHost?.shadowRoot;
     if (!root) return false;
 
+    const options = root.querySelector("#options");
+    if (!options) return false;
+
     const key = `${context.rootId}:${context.selectedReplyId}`;
-    const existing = root.querySelector(".bce-menu-export-item");
+    const existing = options.querySelector(".bce-menu-export-item");
     if (existing) {
       if (existing.dataset?.bceExportFor === key) return true;
       existing.remove();
     }
 
-    const template = findNativeCommentMenuItem(root);
-    if (!template?.parentElement) return false;
-
-    return injectMenuItemIntoContainer(template.parentElement, context, template);
-  }
-
-  function findNativeCommentMenuItem(root) {
-    const actionText = /^(?:举报|删除|置顶|取消置顶|拉黑|取消拉黑|屏蔽|取消屏蔽|复制链接|复制)$/;
-    const nodes = Array.from(root.querySelectorAll(
-      'button, a, li, [role="menuitem"], [class*="item"], [class*="Item"], div, span'
-    ));
-
-    let best = null;
-    let bestScore = -1;
-    for (const node of nodes) {
-      const text = normalizeForMatch(node.textContent || "");
-      if (!actionText.test(text)) continue;
-
-      const tag = String(node.tagName || "").toLowerCase();
-      const hint = `${node.id || ""} ${typeof node.className === "string" ? node.className : ""}`.toLowerCase();
-      let score = 0;
-      if (["button", "a", "li"].includes(tag)) score += 60;
-      if (node.getAttribute?.("role") === "menuitem") score += 60;
-      if (/(?:^|[-_ ])(?:item|option|entry|action)(?:$|[-_ ])/i.test(hint)) score += 45;
-
-      const siblings = Array.from(node.parentElement?.children || []);
-      const nativeSiblingCount = siblings.filter((sibling) =>
-        actionText.test(normalizeForMatch(sibling.textContent || ""))
-      ).length;
-      if (nativeSiblingCount >= 2) score += 35;
-
-      if (score > bestScore) {
-        best = node;
-        bestScore = score;
-      }
-    }
-
-    return best;
+    const template = options.querySelector("li");
+    return injectMenuItemIntoContainer(options, context, template || null);
   }
 
   function injectMenuItemIntoContainer(container, context, template) {
@@ -1017,22 +984,7 @@
       item.removeAttribute?.("href");
       item.removeAttribute?.("target");
     } else {
-      item = document.createElement("button");
-      item.type = "button";
-      item.style.cssText = [
-        "display:flex",
-        "align-items:center",
-        "width:100%",
-        "box-sizing:border-box",
-        "border:0",
-        "background:transparent",
-        "color:inherit",
-        "font:inherit",
-        "line-height:1.5",
-        "padding:8px 12px",
-        "text-align:left",
-        "cursor:pointer",
-      ].join(";");
+      item = document.createElement("li");
     }
 
     if (String(item.tagName || "").toLowerCase() === "button") item.type = "button";

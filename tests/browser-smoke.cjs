@@ -139,7 +139,7 @@ const assert = require('node:assert/strict');
 
     for (const file of [
       'biliforge',
-      'bilibili-comment-anti-fraud-pro',
+      'biliecho',
       'bilibili-comment-thread-exporter',
       'bilibili-live-auto-quality',
     ]) {

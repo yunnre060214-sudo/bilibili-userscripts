@@ -24,7 +24,7 @@
 
 ### BiliEcho
 
-**用途：** 发完评论后自动检查这条评论从无账号视角是否仍然可见，减少“自己看得到，别人看不到”却毫无提示的情况。
+**用途：** 发完评论后自动检查这条评论是否被阿瓦隆和谐。
 
 [安装 BiliEcho 1.0.0](https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/biliecho.user.js)
 

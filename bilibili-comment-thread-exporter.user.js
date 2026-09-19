@@ -2,7 +2,7 @@
 // @name         Bilibili Comment Thread Exporter
 // @name:zh-CN   B站评论楼层导出器
 // @namespace    https://space.bilibili.com/1937432404
-// @version      1.0.5
+// @version      1.0.0
 // @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/bilibili-comment-thread-exporter.user.js
 // @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/bilibili-comment-thread-exporter.user.js
 // @description  Download a complete Bilibili comment thread as Markdown from the native three-dot menu.
@@ -24,7 +24,7 @@
 
   const META = Object.freeze({
     id: "bce-thread-exporter",
-    version: "1.0.5",
+    version: "1.0.0",
     installGuard: "__bceCommentExporterV1Installed",
   });
 

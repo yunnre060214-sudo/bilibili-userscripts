@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BiliForge
 // @namespace    https://space.bilibili.com/1937432404
-// @version      3.3.1
+// @version      1.0.0
 // @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/biliforge.user.js
 // @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/biliforge.user.js
 // @description  Bilibili 体验优化，去广告，URL 清理，P2P CDN 控制，直播优化，文章复制修复
@@ -2081,7 +2081,7 @@
             this.started = true;
 
             const api = {
-                version: '3.3.1',
+                version: '1.0.0',
                 config: CONFIG,
                 hooks: HookManager,
                 live: Object.freeze({

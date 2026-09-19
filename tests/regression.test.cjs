@@ -44,7 +44,7 @@ test('ProMax allows a reused XHR after an earlier blocked URL', () => {
 function exporter(extra = {}) {
   return load('bilibili-comment-thread-exporter', '  boot();', `globalThis.api = { state, patchXhr, patchFetch, looksLikeCommentApi, scheduleScan, fetchThread,
     simplifyReply, formatThreadMarkdown, getReplyLike, getReplyDataFromElement, resolveCommentExportContext,
-    findCommentActionRendererInPath, findBiliCommentMenuHost,
+    findCommentActionRendererInPath, findBiliCommentMenuHost, injectIntoBiliCommentMenu,
     setRequest(fn) { requestJson = fn; delay = async () => {}; },
     setScan(fn) { scanPageForCommentTargets = fn; },
     setIngest(fn) { ingestCommentPayload = fn; } };`, extra);
@@ -133,6 +133,52 @@ test('exporter locates the real Bilibili comment menu from the action renderer c
   assert.equal(api.findBiliCommentMenuHost(path, action), menuHost);
   const context = api.resolveCommentExportContext(action);
   assert.deepEqual({ ...context }, { rootId: '314390848657', selectedReplyId: '314390848657' });
+});
+
+test('exporter targets bili-comment-menu shadowRoot #options directly', () => {
+  const api = exporter({
+    document: {
+      createElement: tag => ({
+        tagName: tag.toUpperCase(),
+        classList: { add() {} },
+        dataset: {},
+        style: {},
+        addEventListener() {},
+        removeAttribute() {},
+      }),
+    },
+  });
+
+  const appended = [];
+  const firstLi = {
+    tagName: 'LI',
+    cloneNode: () => ({
+      tagName: 'LI',
+      classList: { add() {} },
+      dataset: {},
+      style: {},
+      addEventListener() {},
+      removeAttribute() {},
+    }),
+  };
+  const options = {
+    querySelector: selector => selector === '.bce-menu-export-item' ? null : firstLi,
+    appendChild: node => appended.push(node),
+  };
+  const menuHost = {
+    shadowRoot: {
+      querySelector: selector => selector === '#options' ? options : null,
+    },
+  };
+
+  const ok = api.injectIntoBiliCommentMenu(menuHost, {
+    rootId: '314390848657',
+    selectedReplyId: '314390848657',
+  });
+
+  assert.equal(ok, true);
+  assert.equal(appended.length, 1);
+  assert.equal(appended[0].textContent, '导出本楼');
 });
 function anti(extra = {}) {
   return load('bilibili-comment-anti-fraud-pro', '  init();', `globalThis.api = { patchXhr, requestJson, STATE,

@@ -129,9 +129,9 @@ test('ProMax allows a reused XHR after an earlier blocked URL', () => {
   assert.equal(xhr.sent, 1);
 });
 
-test('exporter 1.0.4 keeps the event-driven architecture and no legacy scanners', () => {
+test('exporter 1.0.5 keeps the event-driven architecture and no legacy scanners', () => {
   const code = source('bilibili-comment-thread-exporter');
-  assert.match(code, /@version\s+1\.0\.4/);
+  assert.match(code, /@version\s+1\.0\.5/);
   assert.doesNotMatch(code, /function\s+patchFetch\b/);
   assert.doesNotMatch(code, /function\s+patchXhr\b/);
   assert.doesNotMatch(code, /function\s+observePage\b/);
@@ -139,7 +139,7 @@ test('exporter 1.0.4 keeps the event-driven architecture and no legacy scanners'
   assert.doesNotMatch(code, /function\s+ensureShell\b/);
 });
 
-test('exporter 1.0.4 is download-only and contains no clipboard path', () => {
+test('exporter 1.0.5 is download-only and contains no clipboard path', () => {
   const code = source('bilibili-comment-thread-exporter');
   assert.doesNotMatch(code, /导出本楼/);
   assert.doesNotMatch(code, /GM_setClipboard/);
@@ -331,7 +331,7 @@ test('exporter paginates, deduplicates and flattens replies', async () => {
     seedReply: reply('3', '2'),
   });
 
-  assert.equal(result.exporter.version, '1.0.4');
+  assert.equal(result.exporter.version, '1.0.5');
   assert.equal(result.exporter.duplicateReplyCount, 1);
   assert.equal(result.exporter.complete, true);
   assert.equal(result.exporter.expectedReplyCount, 4);
@@ -434,11 +434,55 @@ test('exporter Markdown includes likes, UID, IP location and reply target', () =
   assert.match(markdown, /点赞 67/);
   assert.match(markdown, /UID 10/);
   assert.match(markdown, /IP属地：重庆/);
-  assert.match(markdown, /回复 \[0001\]\(#msg-0001\) 根用户：「根评论」/);
+  assert.match(markdown, /回复 \[0001\]\(#msg-0001\) 根用户$/m);
+  assert.doesNotMatch(markdown, /回复 \[0001\]\(#msg-0001\) 根用户：「根评论」/);
   assert.match(markdown, /直接回复（1）：\[0002\]\(#msg-0002\) 回复用户/);
   assert.match(markdown, /IP属地：广东/);
   assert.doesNotMatch(markdown, /## 选中的评论/);
   assert.doesNotMatch(markdown, /schema v/i);
+});
+
+test('exporter 1.0.5 suppresses shallow redundancy but keeps deep navigation', () => {
+  const api = exporter({
+    document: { querySelector: () => null, title: '测试视频' },
+  });
+
+  const make = (id, parent, message) => api.normalizeReply({
+    rpid_str: String(id),
+    root: id === 1 ? 0 : 1,
+    parent,
+    ctime: 1789787000 + id,
+    member: { mid: String(id), uname: `用户${id}` },
+    content: { message },
+  });
+
+  const root = make(1, 0, '这是会被大量 L1 回复重复引用的根评论摘要');
+  const replies = [
+    make(2, 1, '第一层'),
+    make(3, 2, '第二层'),
+    make(4, 3, '第三层'),
+    make(5, 4, '第四层'),
+  ];
+
+  const thread = {
+    exporter: { complete: true, actualReplyCount: 4, expectedReplyCount: 4 },
+    source: { title: '密度测试', url: '', bvid: '', oid: '1', rootRpid: '1', selectedRpid: '5' },
+    root,
+    replies,
+  };
+
+  const markdown = api.formatThreadMarkdown(thread);
+
+  assert.match(markdown, /回复 \[0001\]\(#msg-0001\) 用户1$/m);
+  assert.doesNotMatch(markdown, /回复 \[0001\]\(#msg-0001\) 用户1：「/);
+
+  assert.match(markdown, /回复 \[0002\]\(#msg-0002\) 用户2：「第一层」/);
+  assert.match(markdown, /回复 \[0003\]\(#msg-0003\) 用户3：「第二层」/);
+  assert.match(markdown, /回复 \[0004\]\(#msg-0004\) 用户4：「第三层」/);
+
+  assert.doesNotMatch(markdown, /路径：\[0001\]\(#msg-0001\) → \[0002\]\(#msg-0002\) → \[0003\]\(#msg-0003\)$/m);
+  assert.doesNotMatch(markdown, /路径：\[0001\]\(#msg-0001\) → \[0002\]\(#msg-0002\)$/m);
+  assert.match(markdown, /路径：\[0001\]\(#msg-0001\) → \[0002\]\(#msg-0002\) → \[0003\]\(#msg-0003\) → \[0004\]\(#msg-0004\) → \[0005\]\(#msg-0005\)/);
 });
 
 test('exporter graph keeps deep reply chains flat and precise', () => {

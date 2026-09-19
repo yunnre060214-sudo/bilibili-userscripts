@@ -136,6 +136,15 @@ test('exporter 1.0 removes the legacy page scanner and network observers', () =>
   assert.doesNotMatch(code, /function\s+ensureShell\b/);
 });
 
+test('exporter 1.0.1 removes JSON export and adds Markdown file download', () => {
+  const code = source('bilibili-comment-thread-exporter');
+  assert.doesNotMatch(code, /导出本楼 JSON/);
+  assert.doesNotMatch(code, /application\/json;charset/);
+  assert.doesNotMatch(code, /schemaVersion/);
+  assert.match(code, /下载本楼 MD/);
+  assert.match(code, /text\/markdown;charset=utf-8/);
+});
+
 test('exporter resolves the clicked root comment directly from action renderer __data', () => {
   const api = exporter();
   const action = {
@@ -215,7 +224,7 @@ test('exporter recognizes the actual Bilibili three-dot button path and menu hos
   assert.equal(api.findBiliCommentMenuHost(path, action), menuHost);
 });
 
-test('exporter injects separate Markdown and JSON native-style menu items', () => {
+test('exporter injects copy and download Markdown native-style menu items', () => {
   const api = exporter({ document: { createElement: makeLi } });
   const appended = [];
   const template = makeLi();
@@ -243,13 +252,13 @@ test('exporter injects separate Markdown and JSON native-style menu items', () =
     selectedReplyId: '10001',
   };
 
-  api.ensureMenuItem(options, context, 'markdown', '导出本楼');
-  api.ensureMenuItem(options, context, 'json', '导出本楼 JSON');
-  api.ensureMenuItem(options, context, 'markdown', '导出本楼');
+  api.ensureMenuItem(options, context, 'copy-md', '导出本楼');
+  api.ensureMenuItem(options, context, 'download-md', '下载本楼 MD');
+  api.ensureMenuItem(options, context, 'copy-md', '导出本楼');
 
   assert.equal(appended.length, 2);
   assert.equal(appended[0].textContent, '导出本楼');
-  assert.equal(appended[1].textContent, '导出本楼 JSON');
+  assert.equal(appended[1].textContent, '下载本楼 MD');
 });
 
 function makeLi() {
@@ -271,7 +280,7 @@ function makeLi() {
   };
 }
 
-test('exporter paginates, deduplicates, flattens replies and emits schema v1', async () => {
+test('exporter paginates, deduplicates and flattens replies', async () => {
   const api = exporter({
     document: { querySelector: () => null, title: '测试视频' },
   });
@@ -315,8 +324,7 @@ test('exporter paginates, deduplicates, flattens replies and emits schema v1', a
     seedReply: reply('3', '2'),
   });
 
-  assert.equal(result.schemaVersion, 1);
-  assert.equal(result.exporter.version, '1.0.0');
+  assert.equal(result.exporter.version, '1.0.1');
   assert.equal(result.exporter.complete, true);
   assert.equal(result.exporter.expectedReplyCount, 4);
   assert.equal(result.exporter.actualReplyCount, 4);
@@ -395,7 +403,6 @@ test('exporter Markdown includes likes, UID, IP location and reply target', () =
   });
 
   const markdown = api.formatThreadMarkdown({
-    schemaVersion: 1,
     exporter: {
       complete: true,
       actualReplyCount: 1,
@@ -419,7 +426,7 @@ test('exporter Markdown includes likes, UID, IP location and reply target', () =
   assert.match(markdown, /IP属地：重庆/);
   assert.match(markdown, /回复 \*\*根用户\*\*/);
   assert.match(markdown, /IP属地：广东/);
-  assert.match(markdown, /schema v1/);
+  assert.doesNotMatch(markdown, /schema v/i);
 });
 
 test('starting a new export task cancels and aborts the previous task', () => {

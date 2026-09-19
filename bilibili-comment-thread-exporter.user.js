@@ -2,7 +2,7 @@
 // @name         Bilibili Comment Thread Exporter
 // @name:zh-CN   B站评论楼层导出器
 // @namespace    https://space.bilibili.com/1937432404
-// @version      0.5.2
+// @version      0.5.3
 // @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/bilibili-comment-thread-exporter.user.js
 // @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/bilibili-comment-thread-exporter.user.js
 // @description  Add lightweight page controls to export one Bilibili comment thread as Markdown or JSON.
@@ -20,7 +20,7 @@
   "use strict";
 
   const SCRIPT_ID = "bce-thread-exporter";
-  const VERSION = "0.5.2";
+  const VERSION = "0.5.3";
   const COMMENT_TYPE_VIDEO = 1;
   const REPLY_PAGE_SIZE = 20;
   const MAX_REPLY_PAGES = 250;
@@ -579,8 +579,7 @@
     const candidates = collectCandidateElements();
     ingestRepliesFromDom(candidates);
     updateRootDomOrder(candidates);
-    bindButtonsByStoredRoots(candidates);
-    bindButtonsByElementIds(candidates);
+    removeLegacyInlineButtons();
     scheduleMenuInjection(20);
     scheduleRender(100);
   }
@@ -658,155 +657,13 @@
     return Array.from(new Set(result));
   }
 
-  function bindButtonsByStoredRoots(candidates) {
-    const roots = getSortedRoots().slice(0, 160);
-    for (const root of roots) {
-      const id = getReplyId(root);
-      if (!id) continue;
-      const target = findBestElementForRoot(root, candidates);
-      if (target) {
-        const targetIndex = candidates.indexOf(target);
-        if (targetIndex >= 0 && !state.rootDomOrder.has(id)) state.rootDomOrder.set(id, targetIndex);
-        bindExportButton(target, id);
-      }
+  function removeLegacyInlineButtons() {
+    for (const button of deepQueryAll(".bce-inline-btn")) {
+      button.remove();
     }
-  }
-
-  function bindButtonsByElementIds(candidates) {
-    for (const element of candidates) {
-      const id = findReplyIdInElement(element);
-      if (!id) continue;
-      if (!state.roots.has(id) && !looksLikeRootElement(element)) continue;
-      bindExportButton(element, id);
-      if (!state.roots.has(id)) {
-        storeRootReply({ rpid: Number(id), rpid_str: id, root: 0, content: { message: "" }, member: {} }, "");
-      }
+    for (const element of deepQueryAll("[data-bce-export-root]")) {
+      element.removeAttribute?.("data-bce-export-root");
     }
-  }
-
-  function looksLikeRootElement(element) {
-    const className = String(element.className || "").toLowerCase();
-    if (className.includes("root-reply") || className.includes("rootreply")) return true;
-    const attr = element.getAttribute?.("data-root") || element.getAttribute?.("data-root-id") || "";
-    return /\d{5,}/.test(attr);
-  }
-
-  function findBestElementForRoot(root, candidates) {
-    const id = getReplyId(root);
-    const user = normalizeForMatch(getReplyUser(root));
-    const message = normalizeForMatch(getReplyMessage(root));
-    const needle = message.slice(0, Math.min(28, Math.max(12, message.length)));
-    let best = null;
-    let bestScore = 0;
-
-    for (const element of candidates) {
-      const elementId = findReplyIdInElement(element);
-      const text = normalizeForMatch(element.textContent || "");
-      let score = 0;
-
-      if (elementId && elementId === id) score += 100;
-      if (user && text.includes(user)) score += 10;
-      if (needle && text.includes(needle)) score += 30;
-      if (!score) continue;
-
-      const lengthPenalty = Math.min(text.length / 1500, 8);
-      score -= lengthPenalty;
-
-      if (score > bestScore) {
-        best = element;
-        bestScore = score;
-      }
-    }
-
-    return bestScore >= 20 ? best : null;
-  }
-
-  function findReplyIdInElement(element) {
-    const dataReply = getReplyDataFromElement(element);
-    const dataId = getReplyId(dataReply);
-    if (dataId) return dataId;
-
-    const direct = pickReplyIdFromAttributes(element);
-    if (direct) return direct;
-
-    const descendants = Array.from(element.querySelectorAll?.("[data-rpid], [data-reply-id], [data-id], a[href], bili-comment-renderer, bili-comment-reply-renderer") || []).slice(0, 100);
-    for (const child of descendants) {
-      const childDataId = getReplyId(getReplyDataFromElement(child));
-      if (childDataId) return childDataId;
-      const id = pickReplyIdFromAttributes(child);
-      if (id) return id;
-    }
-    return "";
-  }
-
-  function getReplyDataFromElement(element) {
-    if (!element || typeof element !== "object") return null;
-    const data = element.__data;
-    if (!data || typeof data !== "object") return null;
-
-    const candidates = [
-      data.reply,
-      data.root,
-      data.comment,
-      data.data?.reply,
-      data.data?.root,
-      data.data,
-      data,
-    ];
-    for (const candidate of candidates) {
-      if (candidate && typeof candidate === "object" && getReplyId(candidate)) return candidate;
-    }
-    return null;
-  }
-
-  function pickReplyIdFromAttributes(element) {
-    if (!element || !element.getAttributeNames) return "";
-    for (const name of element.getAttributeNames()) {
-      const lower = name.toLowerCase();
-      if (!/(rpid|reply|comment|data-id)/.test(lower)) continue;
-      const id = pickNumericId(element.getAttribute(name));
-      if (id) return id;
-    }
-
-    if (element.tagName === "A") {
-      const href = element.getAttribute("href") || "";
-      const match = href.match(/(?:reply_id|rpid|comment_id|root|reply)=?(\d{5,})/i);
-      if (match) return match[1];
-    }
-    return "";
-  }
-
-  function pickNumericId(value) {
-    const text = String(value || "");
-    const match = text.match(/\b\d{5,}\b/);
-    return match ? match[0] : "";
-  }
-
-  function bindExportButton(element, rootId) {
-    const id = String(rootId || "");
-    const tag = String(element?.tagName || "").toLowerCase();
-    if (tag === "bili-comment-thread-renderer") return;
-    if (!id || !element || element.dataset?.bceExportRoot === id) return;
-    if (element.querySelector && element.querySelector(`.bce-inline-btn[data-root-id="${cssEscape(id)}"]`)) return;
-
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "bce-inline-btn";
-    button.dataset.rootId = id;
-    button.textContent = "导出本楼";
-    button.title = "复制本楼 Markdown；按住 Alt/Option 点击下载 JSON";
-    button.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      exportRoot(id, { format: event.altKey ? "json" : "markdown", sourceButton: button });
-    });
-
-    const target =
-      element.querySelector?.('[class*="operation"], [class*="Operation"], [class*="action"], [class*="Action"], [class*="info"], [class*="Info"]') ||
-      element;
-    target.appendChild(button);
-
-    if (element.dataset) element.dataset.bceExportRoot = id;
   }
 
   function installCommentMenuIntegration() {

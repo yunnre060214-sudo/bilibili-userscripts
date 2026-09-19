@@ -156,7 +156,7 @@ const assert = require('node:assert/strict');
     await page.locator('bili-comment-menu .bce-menu-export-item').first().waitFor();
 
     const menuLabels = await page.locator('bili-comment-menu .bce-menu-export-item').allTextContents();
-    assert.deepEqual(menuLabels, ['导出本楼', '导出本楼 JSON']);
+    assert.deepEqual(menuLabels, ['导出本楼', '下载本楼 MD']);
 
     await page.locator('bili-comment-menu .bce-menu-export-item').filter({ hasText: '导出本楼' }).first().click();
     await page.waitForFunction(() => window.copiedText?.includes('测试回复 5'));
@@ -167,15 +167,16 @@ const assert = require('node:assert/strict');
     assert.match(markdown, /IP属地：重庆/);
 
     const downloadPromise = page.waitForEvent('download');
-    await page.locator('bili-comment-menu .bce-menu-export-item').filter({ hasText: '导出本楼 JSON' }).click();
+    await page.locator('bili-comment-menu .bce-menu-export-item').filter({ hasText: '下载本楼 MD' }).click();
     const download = await downloadPromise;
-    const json = JSON.parse(fs.readFileSync(await download.path(), 'utf8'));
+    const suggestedName = download.suggestedFilename();
+    const downloadedMarkdown = fs.readFileSync(await download.path(), 'utf8');
 
-    assert.deepEqual(json.replies.map(r => r.rpid), ['2', '3', '4', '5']);
-    assert.equal(json.schemaVersion, 1);
-    assert.equal(json.exporter.version, '1.0.0');
-    assert.equal(json.exporter.complete, true);
-    assert.equal(json.root.location, 'IP属地：重庆');
+    assert.match(suggestedName, /\.md$/i);
+    assert.match(downloadedMarkdown, /测试回复 5/);
+    assert.match(downloadedMarkdown, /点赞 67/);
+    assert.match(downloadedMarkdown, /IP属地：重庆/);
+    assert.doesNotMatch(downloadedMarkdown, /schema v/i);
 
     assert.equal(
       await page.evaluate(async () => (await fetch('https://data.bilibili.com/test')).status),
@@ -207,7 +208,7 @@ const assert = require('node:assert/strict');
     });
 
     assert.deepEqual(errors, []);
-    console.log('PASS: four scripts loaded together; native comment menu Markdown/JSON export, schema v1, native XHR, tracker response and high/low/high switching; no page errors.');
+    console.log('PASS: four scripts loaded together; native comment menu Markdown copy/download, native XHR, tracker response and high/low/high switching; no page errors.');
   } finally {
     await browser.close();
   }

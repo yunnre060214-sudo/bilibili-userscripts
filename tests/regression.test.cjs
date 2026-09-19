@@ -68,22 +68,24 @@ function exporter(extra = {}) {
     'bilibili-comment-thread-exporter',
     '  boot();',
     `globalThis.api = {
-      state,
+      runtime,
+      CONFIG,
+      EXPORT_ACTIONS,
       findMoreButtonTrigger,
       findCommentActionRendererInPath,
       findBiliCommentMenuHost,
       getReplyDataFromElement,
       resolveCommentExportContext,
-      ensureMenuItem,
+      ensureMenuAction,
       fetchThread,
-      simplifyReply,
+      normalizeReply,
       formatThreadMarkdown,
       beginExportTask,
       cancelActiveTask,
-      contextKey,
+      makeContextKey,
       getReplyLike,
-      setRequest(fn) { requestJson = fn; },
-      setDelay(fn) { waitBetweenPages = fn; },
+      setRequest(fn) { dependencies.requestJson = fn; },
+      setDelay(fn) { dependencies.waitBetweenPages = fn; },
     };`,
     extra
   );
@@ -126,9 +128,9 @@ test('ProMax allows a reused XHR after an earlier blocked URL', () => {
   assert.equal(xhr.sent, 1);
 });
 
-test('exporter 1.0 removes the legacy page scanner and network observers', () => {
+test('exporter 1.0.2 keeps the event-driven architecture and no legacy scanners', () => {
   const code = source('bilibili-comment-thread-exporter');
-  assert.match(code, /@version\s+1\.0\.0/);
+  assert.match(code, /@version\s+1\.0\.2/);
   assert.doesNotMatch(code, /function\s+patchFetch\b/);
   assert.doesNotMatch(code, /function\s+patchXhr\b/);
   assert.doesNotMatch(code, /function\s+observePage\b/);
@@ -136,7 +138,7 @@ test('exporter 1.0 removes the legacy page scanner and network observers', () =>
   assert.doesNotMatch(code, /function\s+ensureShell\b/);
 });
 
-test('exporter 1.0.1 removes JSON export and adds Markdown file download', () => {
+test('exporter 1.0.2 keeps Markdown-only export behavior', () => {
   const code = source('bilibili-comment-thread-exporter');
   assert.doesNotMatch(code, /导出本楼 JSON/);
   assert.doesNotMatch(code, /application\/json;charset/);
@@ -232,11 +234,11 @@ test('exporter injects copy and download Markdown native-style menu items', () =
   const options = {
     querySelector(selector) {
       if (selector === 'li') return template;
-      const match = selector.match(/data-bce-format="([^"]+)"/);
+      const match = selector.match(/data-bce-action="([^"]+)"/);
       if (!match) return null;
       return appended.find(item =>
         item.classNameSet.has('bce-menu-export-item') &&
-        item.dataset.bceFormat === match[1]
+        item.dataset.bceAction === match[1]
       ) || null;
     },
     appendChild(item) {
@@ -252,9 +254,10 @@ test('exporter injects copy and download Markdown native-style menu items', () =
     selectedReplyId: '10001',
   };
 
-  api.ensureMenuItem(options, context, 'copy-md', '导出本楼');
-  api.ensureMenuItem(options, context, 'download-md', '下载本楼 MD');
-  api.ensureMenuItem(options, context, 'copy-md', '导出本楼');
+  for (const action of api.EXPORT_ACTIONS) {
+    api.ensureMenuAction(options, context, action);
+  }
+  api.ensureMenuAction(options, context, api.EXPORT_ACTIONS[0]);
 
   assert.equal(appended.length, 2);
   assert.equal(appended[0].textContent, '导出本楼');
@@ -324,7 +327,7 @@ test('exporter paginates, deduplicates and flattens replies', async () => {
     seedReply: reply('3', '2'),
   });
 
-  assert.equal(result.exporter.version, '1.0.1');
+  assert.equal(result.exporter.version, '1.0.2');
   assert.equal(result.exporter.complete, true);
   assert.equal(result.exporter.expectedReplyCount, 4);
   assert.equal(result.exporter.actualReplyCount, 4);
@@ -381,7 +384,7 @@ test('exporter Markdown includes likes, UID, IP location and reply target', () =
     document: { querySelector: () => null, title: '测试视频' },
   });
 
-  const root = api.simplifyReply({
+  const root = api.normalizeReply({
     rpid_str: '1',
     root: 0,
     parent: 0,
@@ -391,7 +394,7 @@ test('exporter Markdown includes likes, UID, IP location and reply target', () =
     content: { message: '根评论' },
     reply_control: { location: 'IP属地：重庆' },
   });
-  const child = api.simplifyReply({
+  const child = api.normalizeReply({
     rpid_str: '2',
     root: 1,
     parent: 1,
@@ -440,7 +443,7 @@ test('starting a new export task cancels and aborts the previous task', () => {
   assert.equal(first.cancelled, true);
   assert.equal(aborted, 1);
   assert.equal(second.cancelled, false);
-  assert.equal(api.state.activeTask, second);
+  assert.equal(api.runtime.export.activeTask, second);
 });
 
 test('anti-fraud observes JSON XHR but ignores unrelated reuse', () => {

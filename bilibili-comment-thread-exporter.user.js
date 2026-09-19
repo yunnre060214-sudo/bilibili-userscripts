@@ -2,11 +2,11 @@
 // @name         Bilibili Comment Thread Exporter
 // @name:zh-CN   B站评论楼层导出器
 // @namespace    https://space.bilibili.com/1937432404
-// @version      0.4.3
+// @version      0.5.0
 // @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/bilibili-comment-thread-exporter.user.js
 // @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/bilibili-comment-thread-exporter.user.js
 // @description  Add lightweight page controls to export one Bilibili comment thread as Markdown or JSON.
-// @description:zh-CN 给 B 站评论区增加“导出本楼”和右下角面板，把指定楼层整理成 Markdown 或 JSON。
+// @description:zh-CN 给 B 站评论区增加楼层导出、点赞数和三点菜单快捷导出，把指定楼层整理成 Markdown 或 JSON。
 // @author       素晴
 // @match        https://www.bilibili.com/video/*
 // @connect      api.bilibili.com
@@ -20,7 +20,7 @@
   "use strict";
 
   const SCRIPT_ID = "bce-thread-exporter";
-  const VERSION = "0.4.3";
+  const VERSION = "0.5.0";
   const COMMENT_TYPE_VIDEO = 1;
   const REPLY_PAGE_SIZE = 20;
   const MAX_REPLY_PAGES = 250;
@@ -41,6 +41,7 @@
     renderTimer: 0,
     shell: null,
     panelOpen: false,
+    menuTarget: null,
   };
 
   boot();
@@ -52,6 +53,7 @@
       ensureShell();
       installFullscreenTracking();
       observePage();
+      installCommentMenuIntegration();
       scheduleScan(100);
       ensureAid()
         .then(() => fetchInitialRoots())
@@ -236,6 +238,7 @@
       });
       if (!hasPageChange) return;
       scheduleScan(600);
+      scheduleMenuInjection(60);
       updateShellVisibility();
     });
     observer.observe(document.documentElement || document.body, {
@@ -529,7 +532,8 @@
       main.className = "bce-list-main";
       const user = document.createElement("div");
       user.className = "bce-list-user";
-      user.textContent = getReplyUser(root) || `rpid ${id}`;
+      const userName = getReplyUser(root) || `rpid ${id}`;
+      user.textContent = `${userName} · 点赞 ${getReplyLike(root)}`;
       const snippet = document.createElement("div");
       snippet.className = "bce-list-snippet";
       snippet.textContent = getReplyMessage(root) || "(无正文)";
@@ -573,10 +577,21 @@
 
   function scanPageForCommentTargets() {
     const candidates = collectCandidateElements();
+    ingestRepliesFromDom(candidates);
     updateRootDomOrder(candidates);
     bindButtonsByStoredRoots(candidates);
     bindButtonsByElementIds(candidates);
+    scheduleMenuInjection(20);
     scheduleRender(100);
+  }
+
+  function ingestRepliesFromDom(candidates) {
+    for (const element of candidates) {
+      const reply = getReplyDataFromElement(element);
+      if (!reply) continue;
+      storeSeenReply(reply, "dom:__data");
+      if (isRootReply(reply)) storeRootReply(reply, "dom:__data");
+    }
   }
 
   function updateRootDomOrder(candidates) {
@@ -596,6 +611,9 @@
 
   function collectCandidateElements() {
     const selector = [
+      "bili-comment-thread-renderer",
+      "bili-comment-renderer",
+      "bili-comment-reply-renderer",
       "[data-rpid]",
       "[data-reply-id]",
       "[data-id]",
@@ -616,6 +634,10 @@
     return deepQueryAll(selector).filter((element) => {
       if (!element || element.nodeType !== Node.ELEMENT_NODE) return false;
       if (element.closest && element.closest(`#${SCRIPT_ID}-shell`)) return false;
+      const tag = String(element.tagName || "").toLowerCase();
+      if (["bili-comment-thread-renderer", "bili-comment-renderer", "bili-comment-reply-renderer"].includes(tag)) {
+        return true;
+      }
       const text = normalizeForMatch(element.textContent || "");
       return text.length > 0 && text.length < 8000;
     });
@@ -700,15 +722,41 @@
   }
 
   function findReplyIdInElement(element) {
+    const dataReply = getReplyDataFromElement(element);
+    const dataId = getReplyId(dataReply);
+    if (dataId) return dataId;
+
     const direct = pickReplyIdFromAttributes(element);
     if (direct) return direct;
 
-    const descendants = Array.from(element.querySelectorAll("[data-rpid], [data-reply-id], [data-id], a[href]")).slice(0, 80);
+    const descendants = Array.from(element.querySelectorAll?.("[data-rpid], [data-reply-id], [data-id], a[href], bili-comment-renderer, bili-comment-reply-renderer") || []).slice(0, 100);
     for (const child of descendants) {
+      const childDataId = getReplyId(getReplyDataFromElement(child));
+      if (childDataId) return childDataId;
       const id = pickReplyIdFromAttributes(child);
       if (id) return id;
     }
     return "";
+  }
+
+  function getReplyDataFromElement(element) {
+    if (!element || typeof element !== "object") return null;
+    const data = element.__data;
+    if (!data || typeof data !== "object") return null;
+
+    const candidates = [
+      data.reply,
+      data.root,
+      data.comment,
+      data.data?.reply,
+      data.data?.root,
+      data.data,
+      data,
+    ];
+    for (const candidate of candidates) {
+      if (candidate && typeof candidate === "object" && getReplyId(candidate)) return candidate;
+    }
+    return null;
   }
 
   function pickReplyIdFromAttributes(element) {
@@ -757,6 +805,191 @@
     target.appendChild(button);
 
     if (element.dataset) element.dataset.bceExportRoot = id;
+  }
+
+  function installCommentMenuIntegration() {
+    if (document.__bceCommentMenuInstalled) return;
+    document.__bceCommentMenuInstalled = true;
+    document.addEventListener("pointerdown", handleCommentMenuPointerDown, true);
+  }
+
+  function handleCommentMenuPointerDown(event) {
+    const path = typeof event.composedPath === "function" ? event.composedPath() : [event.target];
+    const trigger = path.find((node) => node?.nodeType === Node.ELEMENT_NODE && isCommentMoreTrigger(node));
+    if (!trigger) return;
+
+    const commentElement = findCommentElementInPath(path, trigger);
+    const context = resolveCommentExportContext(commentElement);
+    if (!context?.rootId) return;
+
+    state.menuTarget = {
+      rootId: context.rootId,
+      selectedReplyId: context.selectedReplyId || context.rootId,
+      capturedAt: Date.now(),
+    };
+
+    scheduleMenuInjection(0);
+    scheduleMenuInjection(80);
+    scheduleMenuInjection(220);
+    scheduleMenuInjection(600);
+  }
+
+  function isCommentMoreTrigger(element) {
+    if (!element || element.classList?.contains("bce-menu-export-item")) return false;
+    const hint = [
+      element.tagName,
+      element.id,
+      element.className,
+      element.getAttribute?.("aria-label"),
+      element.getAttribute?.("title"),
+      element.getAttribute?.("data-title"),
+    ].filter(Boolean).join(" ").toLowerCase();
+    const text = normalizeForMatch(element.textContent || "").slice(0, 30);
+    return /(?:more|ellipsis|three[-_ ]?dot|operation[-_ ]?more|menu[-_ ]?button)/i.test(hint) ||
+      /^(?:更多|more)$/i.test(text);
+  }
+
+  function findCommentElementInPath(path, trigger) {
+    const isCommentElement = (node) => {
+      if (!node || node.nodeType !== Node.ELEMENT_NODE) return false;
+      const tag = String(node.tagName || "").toLowerCase();
+      if (["bili-comment-thread-renderer", "bili-comment-renderer", "bili-comment-reply-renderer"].includes(tag)) return true;
+      const className = String(node.className || "").toLowerCase();
+      return Boolean(
+        pickReplyIdFromAttributes(node) ||
+        className.includes("root-reply") ||
+        className.includes("sub-reply") ||
+        className.includes("reply-item") ||
+        className.includes("comment-item")
+      );
+    };
+
+    for (const node of path) {
+      if (isCommentElement(node)) return node;
+    }
+
+    return trigger?.closest?.(
+      "bili-comment-thread-renderer, bili-comment-renderer, bili-comment-reply-renderer, [data-rpid], [data-reply-id], .root-reply-container, .sub-reply-container, .reply-item, .sub-reply-item, .comment-item"
+    ) || null;
+  }
+
+  function resolveCommentExportContext(element) {
+    if (!element) return null;
+
+    const dataReply = getReplyDataFromElement(element);
+    if (dataReply) storeSeenReply(dataReply, "dom:menu");
+
+    const selectedReplyId = getReplyId(dataReply) || findReplyIdInElement(element);
+    if (!selectedReplyId) return null;
+
+    const indexed = dataReply || state.replyIndex.get(selectedReplyId);
+    let rootId = indexed?.root == null ? "" : String(indexed.root);
+    if (!rootId || rootId === "0") rootId = selectedReplyId;
+
+    if (state.roots.has(selectedReplyId)) rootId = selectedReplyId;
+
+    const directRoot = pickNumericId(
+      element.getAttribute?.("data-root") ||
+      element.getAttribute?.("data-root-id") ||
+      ""
+    );
+    if (directRoot) rootId = directRoot;
+
+    return { rootId, selectedReplyId };
+  }
+
+  function scheduleMenuInjection(delay) {
+    window.setTimeout(injectExportIntoOpenMenu, Math.max(0, Number(delay) || 0));
+  }
+
+  function injectExportIntoOpenMenu() {
+    const context = state.menuTarget;
+    if (!context || Date.now() - context.capturedAt > 8000) return;
+
+    const menu = findBestOpenCommentMenu();
+    if (!menu) return;
+
+    const key = `${context.rootId}:${context.selectedReplyId}`;
+    if (menu.dataset?.bceExportFor === key || menu.querySelector?.(".bce-menu-export-item")) return;
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "bce-menu-export-item";
+    button.textContent = "导出本楼";
+    button.title = "复制本楼 Markdown；按住 Alt/Option 点击下载 JSON";
+    button.style.cssText = [
+      "display:flex",
+      "align-items:center",
+      "width:100%",
+      "box-sizing:border-box",
+      "border:0",
+      "background:transparent",
+      "color:inherit",
+      "font:inherit",
+      "line-height:1.5",
+      "padding:8px 12px",
+      "text-align:left",
+      "cursor:pointer",
+    ].join(";");
+
+    button.addEventListener("mouseenter", () => {
+      button.style.background = "rgba(0, 0, 0, 0.06)";
+    });
+    button.addEventListener("mouseleave", () => {
+      button.style.background = "transparent";
+    });
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      exportRoot(context.rootId, {
+        format: event.altKey ? "json" : "markdown",
+        sourceButton: button,
+        selectedReplyId: context.selectedReplyId,
+      });
+    });
+
+    menu.appendChild(button);
+    if (menu.dataset) menu.dataset.bceExportFor = key;
+  }
+
+  function findBestOpenCommentMenu() {
+    const selector = [
+      '[role="menu"]',
+      '[class*="more-menu"]',
+      '[class*="MoreMenu"]',
+      '[class*="operation-menu"]',
+      '[class*="OperationMenu"]',
+      '[class*="menu-list"]',
+      '[class*="MenuList"]',
+      '[class*="popover"]',
+      '[class*="Popover"]',
+      '[class*="popup"]',
+      '[class*="Popup"]',
+    ].join(",");
+
+    const candidates = deepQueryAll(selector)
+      .filter((element) => {
+        if (!isElementVisible(element)) return false;
+        if (element.closest?.(`#${SCRIPT_ID}-shell`)) return false;
+        const text = normalizeForMatch(element.textContent || "");
+        if (!text || text.length > 500) return false;
+        return /举报|删除|置顶|拉黑|屏蔽|复制|report|delete|block/i.test(text);
+      })
+      .sort((a, b) => normalizeForMatch(a.textContent || "").length - normalizeForMatch(b.textContent || "").length);
+
+    return candidates[0] || null;
+  }
+
+  function isElementVisible(element) {
+    if (!element?.isConnected) return false;
+    const rect = element.getBoundingClientRect?.();
+    if (rect && (rect.width <= 0 || rect.height <= 0)) return false;
+    try {
+      const style = getComputedStyle(element);
+      if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) return false;
+    } catch (_) {
+      // Ignore transient or detached shadow DOM nodes.
+    }
+    return true;
   }
 
   function cssEscape(value) {
@@ -1036,7 +1269,7 @@
         ctime: reply?.ctime || 0,
         local: reply?.ctime ? formatTime(reply.ctime) : "",
       },
-      like: reply?.like || 0,
+      like: getReplyLike(reply),
       message: content.message || "",
       pictures: Array.isArray(content.pictures)
         ? content.pictures.map((picture) => picture.img_src || picture.src || "").filter(Boolean)
@@ -1101,10 +1334,11 @@
     const name = reply.user?.name || `mid:${reply.user?.mid || "unknown"}`;
     const time = reply.time?.local ? ` · ${reply.time.local}` : "";
     const parent = parentName ? ` 回复 ${parentName}` : "";
+    const like = ` · 点赞 ${getReplyLike(reply)}`;
     const message = (reply.message || "(无正文)").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
     const messageLines = message.split("\n");
 
-    lines.push(`${indent}- **${escapeMarkdown(name)}**${parent}${time}`);
+    lines.push(`${indent}- **${escapeMarkdown(name)}**${parent}${time}${like}`);
     for (const line of messageLines) {
       lines.push(`${indent}  ${line || ""}`);
     }
@@ -1159,6 +1393,11 @@
 
   function getReplyMessage(reply) {
     return reply?.content?.message || "";
+  }
+
+  function getReplyLike(reply) {
+    const value = Number(reply?.like);
+    return Number.isFinite(value) && value >= 0 ? Math.trunc(value) : 0;
   }
 
   function normalizeForMatch(value) {

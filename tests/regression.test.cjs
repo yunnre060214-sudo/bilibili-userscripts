@@ -5,6 +5,7 @@ const vm = require('node:vm');
 const path = require('node:path');
 
 const source = name => fs.readFileSync(path.join(__dirname, '..', name + '.user.js'), 'utf8');
+const repoFile = name => fs.readFileSync(path.join(__dirname, '..', name), 'utf8');
 
 function load(name, marker, injection, extra = {}) {
   const context = vm.createContext({
@@ -127,6 +128,19 @@ test('ProMax allows a reused XHR after an earlier blocked URL', () => {
   xhr.send();
 
   assert.equal(xhr.sent, 1);
+});
+
+test('README exporter version matches the userscript header', () => {
+  const script = source('bilibili-comment-thread-exporter');
+  const readme = repoFile('README.md');
+
+  const scriptVersion = script.match(/^\/\/ @version\s+([^\s]+)$/m)?.[1];
+  const readmeHeadingVersion = readme.match(/^## 评论楼层导出器\s+([^\s]+)$/m)?.[1];
+  const readmeBulletVersion = readme.match(/^- 评论楼层导出器 \*\*([^*]+)\*\*：/m)?.[1];
+
+  assert.ok(scriptVersion, 'missing exporter @version');
+  assert.equal(readmeHeadingVersion, scriptVersion);
+  assert.equal(readmeBulletVersion, scriptVersion);
 });
 
 test('exporter 1.0.5 keeps the event-driven architecture and no legacy scanners', () => {

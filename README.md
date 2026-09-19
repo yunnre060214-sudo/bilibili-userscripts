@@ -9,7 +9,7 @@
 - [哔哩发评反诈 Pro](https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/bilibili-comment-anti-fraud-pro.user.js)
 - [B站评论楼层导出器](https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/bilibili-comment-thread-exporter.user.js)
 - [B站直播自动最高/最低画质](https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/bilibili-live-auto-quality.user.js)
-- [Make BiliBili Great Again ProMax](https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/make-bilibili-great-again-promax.user.js)
+- [BiliForge](https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/biliforge.user.js)
 
 如果 Tampermonkey 安装页显示的版本落后于仓库，可改用目标提交 SHA 对应的 Raw 地址绕过缓存。
 
@@ -22,7 +22,7 @@
 - 发评反诈 Pro **4.2.3**：支持 JSON 类型的 XHR 响应，复用请求对象时按当前地址判断；取消检测后不再启动匿名回退请求。已经在途的请求仍可能等待返回或超时。
 - 评论楼层导出器 **1.0.5**：在 1.0.4 的关系校验基础上压缩 Markdown 冗余。L1 直接回复不再重复根评论摘要，L2-L3 不再额外输出路径，L4 及以上继续保留压缩路径；父子编号、锚点、大分叉完整索引和异常关系索引保持不变。
 - 直播画质 **2.4.2**：菜单加载期间保留最新的前后台切换意图；没有可选画质时不触发播放器刷新。
-- ProMax **3.1.2**：修复拦截 fetch 时空 204 响应的构造错误，以及复用 XHR 时残留的拦截标记。
+- BiliForge **3.2.0**：由 Make BiliBili Great Again ProMax 正式更名；保留原功能与兼容接口，并新增 `__BILIFORGE__` 运行时入口。旧 Raw 路径暂时保留用于自动更新迁移。
 
 ## 评论楼层导出器 1.0.5
 

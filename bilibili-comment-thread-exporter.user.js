@@ -38,6 +38,9 @@
     requestTimeoutMs: 30000,
     menuContextTtlMs: 8000,
     menuInjectionDelaysMs: Object.freeze([0, 25, 75, 150, 300, 600, 1000]),
+    parentExcerptLength: 60,
+    childPreviewLimit: 12,
+    breadcrumbMaxSegments: 5,
   });
 
   const API = Object.freeze({
@@ -803,35 +806,33 @@
   }
 
   function formatThreadMarkdown(thread) {
-    const lines = [];
-    const replies = thread.replies || [];
-    const replyIndex = buildReplyIndex(thread.root, replies);
+    const output = [];
+    const graph = buildThreadGraph(thread);
 
-    appendThreadMetadata(lines, thread);
+    appendThreadMetadata(output, thread, graph);
+    output.push("", "## 阅读说明", "");
+    output.push("- 评论按时间顺序平铺，不使用深层缩进。");
+    output.push("- 每条评论使用导出内唯一编号，例如 `[0007]`。");
+    output.push("- “回复”精确指向具体父评论；支持同页锚点的阅读器可直接点击跳转。");
+    output.push("- “直接回复”提供反向索引；高分叉节点的完整子列表放在文末。");
 
-    if (thread.selected?.rpid && thread.selected.rpid !== thread.root?.rpid) {
-      lines.push("", "## 选中的评论", "");
-      appendReplyMarkdown(lines, thread.selected, replyIndex);
-    }
+    output.push("", "## 根评论", "");
+    appendReplyMarkdown(output, graph.rootNode, graph);
 
-    lines.push("", "## 根评论", "");
-    appendReplyMarkdown(lines, thread.root, replyIndex);
-
-    lines.push("", "## 回复", "");
-
-    if (replies.length === 0) {
-      lines.push("_没有获取到二级回复。_");
+    output.push("", "## 回复", "");
+    if (graph.replyNodes.length === 0) {
+      output.push("_没有获取到二级回复。_");
     } else {
-      for (const reply of replies) {
-        appendReplyMarkdown(lines, reply, replyIndex);
-      }
+      for (const node of graph.replyNodes) appendReplyMarkdown(output, node, graph);
     }
 
-    lines.push("", `_Exported by Bilibili Comment Thread Exporter ${META.version}_`);
-    return lines.join("\n");
+    appendMissingParentIndex(output, graph);
+    appendLargeChildrenIndexes(output, graph);
+    output.push("", `_Exported by Bilibili Comment Thread Exporter ${META.version}_`);
+    return output.join("\n");
   }
 
-  function appendThreadMetadata(lines, thread) {
+  function appendThreadMetadata(lines, thread, graph) {
     lines.push(`# ${thread.source.title || "Bilibili 评论楼层"}`);
     lines.push("");
     lines.push(`- 页面：${thread.source.url || ""}`);
@@ -839,69 +840,286 @@
     lines.push(`- AV/OID：${thread.source.oid || thread.source.aid || ""}`);
     lines.push(`- 根评论 rpid：${thread.source.rootRpid || ""}`);
     lines.push(`- 选中评论 rpid：${thread.source.selectedRpid || thread.source.rootRpid || ""}`);
-    lines.push(`- 导出时间：${formatTime(Date.now() / 1000)}`);
 
+    const selectedNode = graph.nodeById.get(String(thread.source.selectedRpid || ""));
+    if (selectedNode) {
+      lines.push(`- 选中评论编号：[${selectedNode.label}](#${selectedNode.anchor})`);
+    }
+
+    lines.push(`- 导出时间：${formatTime(Date.now() / 1000)}`);
     const expected = thread.exporter.expectedReplyCount;
-    lines.push(
-      `- 回复数：${thread.exporter.actualReplyCount}` +
-      (expected > 0 ? ` / ${expected}` : "")
-    );
+    lines.push(`- 回复数：${thread.exporter.actualReplyCount}` + (expected > 0 ? ` / ${expected}` : ""));
+    lines.push(`- 缺失父消息：${graph.missingParents.length}`);
 
     if (!thread.exporter.complete) {
       lines.push("- 注意：接口分页提前结束、重复或达到上限，导出结果可能不完整");
     }
   }
 
-  function buildReplyIndex(root, replies) {
-    const index = new Map();
+  function buildThreadGraph(thread) {
+    const rootReply = thread.root || emptyNormalizedReply();
+    const rootId = String(rootReply.rpid || thread.source?.rootRpid || "");
+    const replies = Array.isArray(thread.replies) ? thread.replies.filter(Boolean) : [];
 
-    if (root?.rpid) index.set(root.rpid, root);
-    for (const reply of replies) {
-      if (reply?.rpid) index.set(reply.rpid, reply);
+    const orderedReplies = replies
+      .map((reply, originalIndex) => ({ reply, originalIndex }))
+      .sort((left, right) => {
+        const leftTime = Number(left.reply?.time?.ctime) || 0;
+        const rightTime = Number(right.reply?.time?.ctime) || 0;
+        if (leftTime !== rightTime) return leftTime - rightTime;
+        return left.originalIndex - right.originalIndex;
+      })
+      .map((item) => item.reply);
+
+    const width = Math.max(4, String(orderedReplies.length + 1).length);
+    const rootNode = createThreadNode(rootReply, 1, width, true);
+    const replyNodes = orderedReplies.map((reply, index) => createThreadNode(reply, index + 2, width, false));
+    const nodeById = new Map();
+    if (rootNode.id) nodeById.set(rootNode.id, rootNode);
+    for (const node of replyNodes) if (node.id) nodeById.set(node.id, node);
+
+    const parentById = new Map();
+    const childrenById = new Map();
+    const missingChildrenByParent = new Map();
+
+    for (const node of replyNodes) {
+      const parentId = resolveEffectiveParentId(node.reply, rootId);
+      if (!parentId || parentId === node.id) continue;
+      parentById.set(node.id, parentId);
+
+      if (nodeById.has(parentId)) {
+        if (!childrenById.has(parentId)) childrenById.set(parentId, []);
+        childrenById.get(parentId).push(node);
+      } else {
+        if (!missingChildrenByParent.has(parentId)) missingChildrenByParent.set(parentId, []);
+        missingChildrenByParent.get(parentId).push(node);
+      }
     }
 
-    return index;
+    for (const children of childrenById.values()) {
+      children.sort((left, right) => left.sequence - right.sequence);
+    }
+
+    const graph = {
+      rootId,
+      rootNode,
+      replyNodes,
+      nodeById,
+      parentById,
+      childrenById,
+      missingChildrenByParent,
+      missingParents: [],
+    };
+
+    rootNode.depth = 0;
+    for (const node of replyNodes) node.depth = computeThreadDepth(node, graph);
+
+    graph.missingParents = Array.from(missingChildrenByParent, ([parentId, children]) => ({
+      parentId,
+      children: [...children].sort((left, right) => left.sequence - right.sequence),
+    })).sort((left, right) => (left.children[0]?.sequence || 0) - (right.children[0]?.sequence || 0));
+
+    return graph;
   }
 
-  function appendReplyMarkdown(lines, reply, replyIndex) {
-    if (!reply) return;
-
-    lines.push(formatReplyHeader(reply, replyIndex));
-
-    const message = String(reply.message || "(无正文)")
-      .replace(/\r\n/g, "\n")
-      .replace(/\r/g, "\n");
-
-    for (const line of message.split("\n")) {
-      lines.push(`  ${line || ""}`);
-    }
-
-    for (const picture of reply.pictures || []) {
-      lines.push(`  ![](${picture})`);
-    }
+  function createThreadNode(reply, sequence, width, isRoot) {
+    const label = String(sequence).padStart(width, "0");
+    return {
+      id: String(reply?.rpid || ""),
+      reply,
+      sequence,
+      label,
+      anchor: `msg-${label}`,
+      isRoot,
+      depth: isRoot ? 0 : null,
+    };
   }
 
-  function formatReplyHeader(reply, replyIndex) {
+  function resolveEffectiveParentId(reply, rootId) {
+    const explicitParent = normalizeRelationId(reply?.parent);
+    if (explicitParent) return explicitParent;
+
+    const declaredRoot = normalizeRelationId(reply?.root);
+    if (declaredRoot && declaredRoot !== String(reply?.rpid || "")) return declaredRoot;
+    if (rootId && rootId !== String(reply?.rpid || "")) return rootId;
+    return "";
+  }
+
+  function normalizeRelationId(value) {
+    const id = String(value ?? "").trim();
+    return !id || id === "0" ? "" : id;
+  }
+
+  function computeThreadDepth(node, graph) {
+    if (node.isRoot) return 0;
+
+    const seen = new Set([node.id]);
+    let currentId = node.id;
+    let depth = 0;
+
+    while (currentId) {
+      const parentId = graph.parentById.get(currentId);
+      if (!parentId || !graph.nodeById.has(parentId)) return null;
+      if (seen.has(parentId)) return null;
+
+      depth += 1;
+      if (parentId === graph.rootId) return depth;
+
+      seen.add(parentId);
+      currentId = parentId;
+      if (depth > graph.nodeById.size) return null;
+    }
+
+    return null;
+  }
+
+  function appendReplyMarkdown(lines, node, graph) {
+    if (!node?.reply) return;
+
+    const reply = node.reply;
     const name = reply.user?.name || `mid:${reply.user?.mid || "unknown"}`;
-    const parentName = reply.parent && reply.parent !== "0"
-      ? replyIndex.get(reply.parent)?.user?.name || ""
-      : "";
-
     const metadata = [];
-
     if (reply.user?.mid) metadata.push(`UID ${reply.user.mid}`);
     if (reply.time?.local) metadata.push(reply.time.local);
-
     metadata.push(`点赞 ${toNonNegativeInt(reply.like)}`);
-
     if (reply.location) metadata.push(reply.location);
+    if (node.depth != null) metadata.push(`L${node.depth}`);
 
-    const replyTarget = parentName
-      ? ` 回复 **${escapeMarkdown(parentName)}**`
-      : "";
+    lines.push(`<a id="${node.anchor}"></a>`);
+    lines.push(`**[${node.label}] ${escapeMarkdown(name)}**` + (metadata.length ? ` · ${metadata.join(" · ")}` : ""));
 
-    return `- **${escapeMarkdown(name)}**${replyTarget}` +
-      (metadata.length ? ` · ${metadata.join(" · ")}` : "");
+    appendParentRelation(lines, node, graph);
+    appendChildrenRelation(lines, node, graph);
+
+    const breadcrumb = buildBreadcrumb(node, graph);
+    if (breadcrumb) lines.push(`> 路径：${breadcrumb}`);
+
+    const message = String(reply.message || "(无正文)").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    lines.push("");
+    for (const line of message.split("\n")) lines.push(`> ${escapeMarkdownBodyLine(line)}`);
+    for (const picture of reply.pictures || []) lines.push(`> ![](${picture})`);
+    lines.push("", "---", "");
+  }
+
+  function appendParentRelation(lines, node, graph) {
+    if (node.isRoot) {
+      lines.push("> 根评论");
+      return;
+    }
+
+    const parentId = graph.parentById.get(node.id);
+    if (!parentId) {
+      lines.push("> 回复对象：未知");
+      return;
+    }
+
+    const parentNode = graph.nodeById.get(parentId);
+    if (!parentNode) {
+      lines.push(`> 回复父消息：\`rpid ${escapeMarkdown(parentId)}\`（未获取到、已删除或未包含在本次导出中）`);
+      return;
+    }
+
+    const parentName = parentNode.reply.user?.name || `mid:${parentNode.reply.user?.mid || "unknown"}`;
+    const excerpt = makeParentExcerpt(parentNode.reply.message);
+    lines.push(`> 回复 [${parentNode.label}](#${parentNode.anchor}) ${escapeMarkdown(parentName)}` + (excerpt ? `：「${excerpt}」` : ""));
+  }
+
+  function appendChildrenRelation(lines, node, graph) {
+    const children = graph.childrenById.get(node.id) || [];
+    if (children.length === 0) return;
+
+    const preview = children.slice(0, CONFIG.childPreviewLimit).map((child) => {
+      const childName = child.reply.user?.name || `mid:${child.reply.user?.mid || "unknown"}`;
+      return `[${child.label}](#${child.anchor}) ${escapeMarkdown(childName)}`;
+    });
+
+    if (children.length <= CONFIG.childPreviewLimit) {
+      lines.push(`> 直接回复（${children.length}）：${preview.join("；")}`);
+      return;
+    }
+
+    lines.push(`> 直接回复（${children.length}）：${preview.join("；")}；另有 ${children.length - CONFIG.childPreviewLimit} 条，见 [完整索引](#children-${node.label})`);
+  }
+
+  function makeParentExcerpt(message) {
+    const compact = String(message || "").replace(/\s+/g, " ").trim();
+    if (!compact) return "";
+
+    const chars = Array.from(compact);
+    const shortened = chars.length > CONFIG.parentExcerptLength
+      ? chars.slice(0, CONFIG.parentExcerptLength).join("") + "…"
+      : compact;
+    return escapeMarkdown(shortened);
+  }
+
+  function buildBreadcrumb(node, graph) {
+    if (node.isRoot || node.depth == null || node.depth < 2) return "";
+
+    const chain = [];
+    const seen = new Set();
+    let currentId = node.id;
+
+    while (currentId && !seen.has(currentId)) {
+      seen.add(currentId);
+      const currentNode = graph.nodeById.get(currentId);
+      if (!currentNode) break;
+      chain.push(currentNode);
+      if (currentNode.isRoot) break;
+
+      const parentId = graph.parentById.get(currentId);
+      if (!parentId || !graph.nodeById.has(parentId)) break;
+      currentId = parentId;
+    }
+
+    chain.reverse();
+    if (chain.length < 2) return "";
+    const link = (item) => `[${item.label}](#${item.anchor})`;
+
+    if (chain.length <= CONFIG.breadcrumbMaxSegments) return chain.map(link).join(" → ");
+    return [link(chain[0]), "…", ...chain.slice(-3).map(link)].join(" → ");
+  }
+
+  function appendMissingParentIndex(lines, graph) {
+    if (graph.missingParents.length === 0) return;
+
+    lines.push("", "## 缺失父消息索引", "");
+    lines.push("以下父消息没有出现在本次导出数据中，子评论仍被保留：", "");
+
+    for (const group of graph.missingParents) {
+      const children = group.children.map((child) => {
+        const name = child.reply.user?.name || `mid:${child.reply.user?.mid || "unknown"}`;
+        return `[${child.label}](#${child.anchor}) ${escapeMarkdown(name)}`;
+      });
+      lines.push(`- 父 rpid \`${escapeMarkdown(group.parentId)}\` → ${children.join("；")}`);
+    }
+  }
+
+  function appendLargeChildrenIndexes(lines, graph) {
+    const largeNodes = [graph.rootNode, ...graph.replyNodes].filter((node) => {
+      const children = graph.childrenById.get(node.id) || [];
+      return children.length > CONFIG.childPreviewLimit;
+    });
+    if (largeNodes.length === 0) return;
+
+    lines.push("", "## 大分叉完整索引", "");
+    for (const node of largeNodes) {
+      const children = graph.childrenById.get(node.id) || [];
+      lines.push(`<a id="children-${node.label}"></a>`);
+      lines.push(`### [${node.label}] 的直接回复（${children.length}）`, "");
+      for (const child of children) {
+        const name = child.reply.user?.name || `mid:${child.reply.user?.mid || "unknown"}`;
+        lines.push(`- [${child.label}](#${child.anchor}) ${escapeMarkdown(name)}`);
+      }
+      lines.push("");
+    }
+  }
+
+  function escapeMarkdownBodyLine(line) {
+    const escaped = escapeMarkdown(String(line || ""));
+    return escaped
+      .replace(/^([>#])/g, "\\$1")
+      .replace(/^([-+])\s/g, "\\$1 ")
+      .replace(/^(\d+)\.\s/g, "$1\\. ");
   }
 
   // ---------------------------------------------------------------------------

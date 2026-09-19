@@ -1,11 +1,11 @@
 // ==UserScript==
-// @name         哔哩发评反诈 Pro
+// @name         BiliEcho
 // @namespace    https://space.bilibili.com/1937432404
-// @version      4.2.3
-// @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/bilibili-comment-anti-fraud-pro.user.js
-// @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/bilibili-comment-anti-fraud-pro.user.js
+// @version      4.3.0
+// @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/biliecho.user.js
+// @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/biliecho.user.js
 // @description  B站评论发送后自动检查无账号可见性：正常、疑似仅自己可见、疑似秒删、可疑状态。风控响应会自动降级，不误判评论状态。支持设置、取消队列、透明报告和无限次重新检测。无 AI、无 API Key。
-// @author       素晴
+// @author       freedom-introvert & 素晴
 // @match        https://*.bilibili.com/*
 // @run-at       document-start
 // @grant        unsafeWindow
@@ -14,6 +14,8 @@
 // @grant        GM_setClipboard
 // @connect      api.bilibili.com
 // @license      GPL-3.0
+// @homepageURL  https://github.com/yunnre060214-sudo/bilibili-userscripts
+// @source       https://github.com/freedom-introvert/biliSendCommAntifraud
 // ==/UserScript==
 
 (() => {
@@ -32,7 +34,7 @@
     mainSortByTime: 2,
     replySortByTime: 0,
     recentDedupMs: 30000,
-    logPrefix: '[发评反诈 Pro]',
+    logPrefix: '[BiliEcho]',
   });
 
   const RISK_CONTROL_CODES = new Set([-509, -412, -352]);
@@ -1707,6 +1709,11 @@
       },
       restoreNetworkHooks,
     };
+
+    Object.defineProperty(W, '__BILIECHO__', {
+      value: api,
+      configurable: true,
+    });
 
     Object.defineProperty(W, '__BFC_PRO__', {
       value: api,

@@ -2,11 +2,11 @@
 // @name         Bilibili Comment Thread Exporter
 // @name:zh-CN   B站评论楼层导出器
 // @namespace    https://space.bilibili.com/1937432404
-// @version      1.0.4
+// @version      1.0.5
 // @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/bilibili-comment-thread-exporter.user.js
 // @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/bilibili-comment-thread-exporter.user.js
 // @description  Download a complete Bilibili comment thread as Markdown from the native three-dot menu.
-// @description:zh-CN 在 B 站评论三点菜单中下载完整楼层 Markdown，并校验回复关系、异常数据与大型楼层完整性。
+// @description:zh-CN 在 B 站评论三点菜单中下载高密度楼层 Markdown，保留精确回复关系并减少浅层重复信息。
 // @author       素晴
 // @match        https://www.bilibili.com/video/*
 // @connect      api.bilibili.com
@@ -24,7 +24,7 @@
 
   const META = Object.freeze({
     id: "bce-thread-exporter",
-    version: "1.0.4",
+    version: "1.0.5",
     installGuard: "__bceCommentExporterV1Installed",
   });
 
@@ -39,7 +39,9 @@
     menuContextTtlMs: 8000,
     menuInjectionDelaysMs: Object.freeze([0, 25, 75, 150, 300, 600, 1000]),
     parentExcerptLength: 60,
+    parentExcerptMinDepth: 2,
     childPreviewLimit: 12,
+    breadcrumbMinDepth: 4,
     breadcrumbMaxSegments: 5,
   });
 
@@ -833,6 +835,7 @@
     output.push("- 评论按时间顺序平铺，不使用深层缩进。");
     output.push("- 每条评论使用导出内唯一编号，例如 `[0007]`。");
     output.push("- “回复”表示接口明确给出的 `parent`；“推断回复”表示 `parent` 缺失时依据 `root` 补全。");
+    output.push("- L1 直接回复不重复根评论摘要；L2-L3 不重复输出完整路径；L4 及以上保留压缩路径。");
     output.push("- 回复关系异常不会丢弃评论；异常节点会单独进入文末索引。");
 
     output.push("", "## 根评论", "");
@@ -1211,7 +1214,9 @@
     }
 
     const parentName = parentNode.reply.user?.name || `mid:${parentNode.reply.user?.mid || "unknown"}`;
-    const excerpt = getParentExcerpt(parentNode, graph);
+    const excerpt = shouldShowParentExcerpt(node)
+      ? getParentExcerpt(parentNode, graph)
+      : "";
     const prefix = relation.source === "explicit" ? "回复" : "推断回复";
     const suffix = relation.source === "explicit" ? "" : "（parent 缺失，依据 root）";
     lines.push(`> ${prefix} [${parentNode.label}](#${parentNode.anchor}) ${escapeMarkdown(parentName)}` + (excerpt ? `：「${excerpt}」` : "") + suffix);
@@ -1245,6 +1250,10 @@
     lines.push(`> 直接回复（${children.length}）：${preview.join("；")}；另有 ${children.length - CONFIG.childPreviewLimit} 条，见 [完整索引](#children-${node.label})`);
   }
 
+  function shouldShowParentExcerpt(node) {
+    return node.depth == null || node.depth >= CONFIG.parentExcerptMinDepth;
+  }
+
   function getParentExcerpt(parentNode, graph) {
     if (graph.parentExcerptById.has(parentNode.id)) return graph.parentExcerptById.get(parentNode.id);
 
@@ -1265,7 +1274,13 @@
   }
 
   function buildBreadcrumb(node, graph) {
-    if (node.isRoot || node.depth == null || node.depth < 2) return "";
+    if (
+      node.isRoot ||
+      node.depth == null ||
+      node.depth < CONFIG.breadcrumbMinDepth
+    ) {
+      return "";
+    }
 
     const summary = graph.pathSummaryById.get(node.id);
     if (!summary || summary.length < 2) return "";

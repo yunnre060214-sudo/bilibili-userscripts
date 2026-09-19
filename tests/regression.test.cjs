@@ -95,7 +95,7 @@ function exporter(extra = {}) {
 
 function anti(extra = {}) {
   return load(
-    'bilibili-comment-anti-fraud-pro',
+    'biliecho',
     '  init();',
     `globalThis.api = {
       patchXhr,
@@ -748,7 +748,7 @@ test('starting a new export task cancels and aborts the previous task', () => {
   assert.equal(api.runtime.export.activeTask, second);
 });
 
-test('anti-fraud observes JSON XHR but ignores unrelated reuse', () => {
+test('BiliEcho observes JSON XHR but ignores unrelated reuse', () => {
   const XHR = xhrClass();
   const api = anti({ window: { XMLHttpRequest: XHR } });
   const received = [];
@@ -768,7 +768,7 @@ test('anti-fraud observes JSON XHR but ignores unrelated reuse', () => {
   assert.equal(received[0].code, 0);
 });
 
-test('anti-fraud cancellation prevents fallback requests after fetch fails', async () => {
+test('BiliEcho cancellation prevents fallback requests after fetch fails', async () => {
   const api = anti();
   let fallback = 0;
 

@@ -801,9 +801,9 @@ test('BiliEcho cancellation prevents fallback requests after fetch fails', async
   assert.equal(fallback, 0);
 });
 
-test('BiliForge 3.3.0 owns the live quality controller', () => {
+test('BiliForge 3.3.1 owns the live quality controller', () => {
   const code = source('biliforge');
-  assert.match(code, /@version\s+3\.3\.0/);
+  assert.match(code, /@version\s+3\.3\.1/);
   assert.match(code, /const LiveQualityController = \{/);
   assert.match(code, /const LiveFailureGuard = \{/);
   assert.match(code, /const LiveCDNOptimizer = \{/);
@@ -855,8 +855,9 @@ test('BiliForge live quality applies the latest visibility request during menu l
   assert.equal(clicks.at(-1), '原画');
 });
 
-test('BiliForge FailureGuard blocks auto-high after repeated live failures', () => {
+test('BiliForge FailureGuard temporarily blocks auto-high without erasing the user preference', () => {
   const clicks = [];
+  const writes = [];
   const high = {
     textContent: '原画',
     dataset: { qn: '10000' },
@@ -874,11 +875,62 @@ test('BiliForge FailureGuard blocks auto-high after repeated live failures', () 
     querySelector: selector => selector.includes('.active') ? low : { click() {} },
     querySelectorAll: () => [high, low],
   };
-  const api = liveQuality({ document: doc });
+  const win = {
+    forceHighestQuality: true,
+    localStorage: {
+      getItem: key => key === 'forceHighestQuality' ? 'true' : null,
+      setItem: (key, value) => writes.push([key, String(value)]),
+    },
+  };
+  const api = liveQuality({ document: doc, window: win });
 
   api.failureGuard.trip();
   api.quality.selectQuality('high', false);
 
   assert.equal(api.failureGuard.canAutoHigh(), false);
+  assert.equal(win.forceHighestQuality, true);
+  assert.deepEqual(writes, []);
   assert.deepEqual(clicks, []);
+
+  api.failureGuard.recover();
+
+  assert.equal(api.failureGuard.canAutoHigh(), true);
+  assert.equal(win.forceHighestQuality, true);
+  assert.deepEqual(writes, []);
+});
+
+test('BiliForge skips redundant live quality clicks and refreshes', () => {
+  const clicks = [];
+  const pending = [];
+  const high = {
+    textContent: '原画',
+    dataset: { qn: '10000' },
+    getAttribute: () => null,
+    click: () => clicks.push('原画'),
+  };
+  const low = {
+    textContent: '流畅',
+    dataset: { qn: '80' },
+    getAttribute: () => null,
+    click: () => clicks.push('流畅'),
+  };
+  const doc = {
+    hidden: false,
+    querySelector: selector => {
+      if (selector.includes('.active')) return high;
+      if (selector === '.quality-wrap') return { click() {} };
+      return null;
+    },
+    querySelectorAll: () => [high, low],
+  };
+
+  const api = liveQuality({
+    document: doc,
+    setTimeout: fn => pending.push(fn),
+  });
+
+  api.quality.selectQuality('high', true);
+
+  assert.deepEqual(clicks, []);
+  assert.deepEqual(pending, []);
 });

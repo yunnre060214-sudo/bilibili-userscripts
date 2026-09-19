@@ -20,7 +20,7 @@
 
 - BiliEcho **4.3.0**：由“哔哩发评反诈 Pro”正式更名。项目源自 freedom-introvert/biliSendCommAntifraud 的网页油猴脚本并持续重构，现支持风控降级、匿名回退、延迟复检、检测队列、取消、诊断报告与无限次重新检测。旧 Raw 路径暂时保留用于自动更新迁移。
 - 评论楼层导出器 **1.0.5**：在 1.0.4 的关系校验基础上压缩 Markdown 冗余。L1 直接回复不再重复根评论摘要，L2-L3 不再额外输出路径，L4 及以上继续保留压缩路径；父子编号、锚点、大分叉完整索引和异常关系索引保持不变。
-- BiliForge **3.3.0**：把原独立直播画质脚本完整并入主脚本，新增 `LiveCDNOptimizer`、`LiveQualityController` 与 `LiveFailureGuard`。直播前台自动最高、后台自动最低；网络连续失败时由 FailureGuard 暂停自动拉高，稳定后自动恢复，避免 UI 画质控制与网络层强制最高互相抢状态。旧 Make BiliBili Great Again ProMax Raw 路径继续作为更新迁移副本。
+- BiliForge **3.3.1**：修复 3.3.0 直播整合后的状态一致性问题。FailureGuard 现在只临时暂停自动拉高，不再清除 `forceHighestQuality` 用户偏好，恢复后网络层强制最高会继续生效；当目标画质已经处于选中状态时跳过重复点击和播放器刷新，减少前后台切换与焦点事件造成的无效操作。旧 Make BiliBili Great Again ProMax Raw 路径继续作为更新迁移副本。
 
 ## 评论楼层导出器 1.0.5
 

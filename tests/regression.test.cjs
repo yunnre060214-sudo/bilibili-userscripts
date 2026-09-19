@@ -57,7 +57,7 @@ function xhrClass() {
 
 function network(extra = {}) {
   return load(
-    'make-bilibili-great-again-promax',
+    'biliforge',
     '    App.init();',
     '    globalThis.api = NetworkManager;',
     extra
@@ -109,13 +109,13 @@ function anti(extra = {}) {
   );
 }
 
-test('ProMax returns a valid empty 204 for blocked fetch', async () => {
+test('BiliForge returns a valid empty 204 for blocked fetch', async () => {
   const response = await network().makeBlockedFetchResult('empty', 'tracker');
   assert.equal(response.status, 204);
   assert.equal(await response.text(), '');
 });
 
-test('ProMax allows a reused XHR after an earlier blocked URL', () => {
+test('BiliForge allows a reused XHR after an earlier blocked URL', () => {
   const XHR = xhrClass();
   const api = network({ window: { XMLHttpRequest: XHR } });
   api.addRule('test', url => url.includes('blocked') ? { block: true } : null);

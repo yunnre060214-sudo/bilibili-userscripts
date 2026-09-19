@@ -2,11 +2,11 @@
 // @name         Bilibili Comment Thread Exporter
 // @name:zh-CN   B站评论楼层导出器
 // @namespace    https://space.bilibili.com/1937432404
-// @version      1.0.0
+// @version      1.0.1
 // @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/bilibili-comment-thread-exporter.user.js
 // @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/bilibili-comment-thread-exporter.user.js
-// @description  Export a complete Bilibili comment thread from the native three-dot menu as Markdown or JSON.
-// @description:zh-CN 在 B 站评论三点菜单中直接导出完整楼层，支持 Markdown、JSON、点赞数、IP 属地与完整性校验。
+// @description  Copy or download a complete Bilibili comment thread as Markdown from the native three-dot menu.
+// @description:zh-CN 在 B 站评论三点菜单中复制或下载完整楼层 Markdown，保留点赞数、IP 属地与完整性校验。
 // @author       素晴
 // @match        https://www.bilibili.com/video/*
 // @connect      api.bilibili.com
@@ -20,8 +20,7 @@
   "use strict";
 
   const SCRIPT_ID = "bce-thread-exporter";
-  const VERSION = "1.0.0";
-  const SCHEMA_VERSION = 1;
+  const VERSION = "1.0.1";
   const DEFAULT_COMMENT_TYPE = 1;
   const REPLY_PAGE_SIZE = 20;
   const MAX_REPLY_PAGES = 250;
@@ -194,8 +193,8 @@
     const options = root?.querySelector?.("#options");
     if (!options) return false;
 
-    ensureMenuItem(options, context, "markdown", "导出本楼");
-    ensureMenuItem(options, context, "json", "导出本楼 JSON");
+    ensureMenuItem(options, context, "copy-md", "导出本楼");
+    ensureMenuItem(options, context, "download-md", "下载本楼 MD");
     watchMenuRoot(menuHost, context);
     return true;
   }
@@ -218,7 +217,7 @@
     item.dataset.bceFormat = format;
     item.dataset.bceContextKey = key;
     item.textContent = label;
-    item.title = format === "json" ? "下载本楼 JSON" : "复制本楼 Markdown";
+    item.title = format === "download-md" ? "下载本楼 Markdown 文件" : "复制本楼 Markdown";
     item.style.cursor = "pointer";
 
     const blockNative = (event) => {
@@ -272,7 +271,7 @@
 
   async function exportThread(context, format, sourceItem) {
     const task = beginExportTask();
-    const normalLabel = format === "json" ? "导出本楼 JSON" : "导出本楼";
+    const normalLabel = format === "download-md" ? "下载本楼 MD" : "导出本楼";
     setMenuItemBusy(sourceItem, true, normalLabel);
     showToast("正在获取完整楼层…");
 
@@ -289,18 +288,18 @@
 
       throwIfCancelled(task);
 
-      if (format === "json") {
-        const json = JSON.stringify(thread, null, 2);
+      const markdown = formatThreadMarkdown(thread);
+      if (format === "download-md") {
         downloadText(
-          `${safeFileName(thread.source.title || "bilibili")}-rpid-${thread.source.rootRpid}.json`,
-          json,
-          "application/json;charset=utf-8"
+          `${safeFileName(thread.source.title || "bilibili")}-rpid-${thread.source.rootRpid}.md`,
+          markdown,
+          "text/markdown;charset=utf-8"
         );
       } else {
-        await copyText(formatThreadMarkdown(thread));
+        await copyText(markdown);
       }
 
-      const actionText = format === "json" ? "已下载 JSON" : "已复制 Markdown";
+      const actionText = format === "download-md" ? "已下载 Markdown" : "已复制 Markdown";
       const countText = `${thread.exporter.actualReplyCount} 条回复`;
       showToast(
         thread.exporter.complete
@@ -440,7 +439,6 @@
       (expectedReplyCount === 0 || actualReplyCount >= expectedReplyCount);
 
     return {
-      schemaVersion: SCHEMA_VERSION,
       exporter: {
         name: "Bilibili Comment Thread Exporter",
         version: VERSION,
@@ -589,7 +587,7 @@
     }
 
     lines.push("");
-    lines.push(`_Exported by Bilibili Comment Thread Exporter ${VERSION} · schema v${SCHEMA_VERSION}_`);
+    lines.push(`_Exported by Bilibili Comment Thread Exporter ${VERSION}_`);
     return lines.join("\n");
   }
 

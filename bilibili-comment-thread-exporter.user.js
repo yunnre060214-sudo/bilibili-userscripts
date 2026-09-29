@@ -2,7 +2,7 @@
 // @name         Bilibili Comment Thread Exporter
 // @name:zh-CN   B站评论楼层导出器
 // @namespace    https://space.bilibili.com/1937432404
-// @version      1.0.0
+// @version      1.0.1
 // @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/bilibili-comment-thread-exporter.user.js
 // @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/bilibili-comment-thread-exporter.user.js
 // @description  Download a complete Bilibili comment thread as Markdown from the native three-dot menu.
@@ -10,6 +10,8 @@
 // @author       素晴
 // @match        https://www.bilibili.com/video/*
 // @connect      api.bilibili.com
+// @grant        GM_download
+// @grant        GM_info
 // @grant        GM_xmlhttpRequest
 // @run-at       document-start
 // @noframes
@@ -24,7 +26,7 @@
 
   const META = Object.freeze({
     id: "bce-thread-exporter",
-    version: "1.0.0",
+    version: "1.0.1",
     installGuard: "__bceCommentExporterV1Installed",
   });
 
@@ -81,6 +83,7 @@
     export: {
       activeTask: null,
       nextTaskId: 0,
+      itemTasks: new WeakMap(),
     },
   };
 
@@ -381,6 +384,8 @@
 
   async function runExport(context, action, sourceItem) {
     const task = beginExportTask();
+    let downloadWaitTimer = null;
+    if (sourceItem) runtime.export.itemTasks.set(sourceItem, task);
     setMenuItemBusy(sourceItem, true, action.label);
     showToast("正在获取完整楼层…");
 
@@ -391,7 +396,9 @@
           const totalText = total > 0 ? ` / ${total}` : "";
           const message = `正在导出 ${current}${totalText}`;
 
-          if (sourceItem?.isConnected) sourceItem.textContent = message;
+          if (sourceItem?.isConnected && runtime.export.itemTasks.get(sourceItem) === task) {
+            sourceItem.textContent = message;
+          }
           showToast(message);
         },
       });
@@ -399,9 +406,20 @@
       throwIfCancelled(task);
 
       const markdown = formatThreadMarkdown(thread);
-      deliverMarkdown(thread, markdown);
+      downloadWaitTimer = window.setTimeout(() => {
+        if (task.cancelled || runtime.export.activeTask !== task) return;
+        setMenuItemBusy(sourceItem, false, action.label);
+        showToast("仍在等待浏览器确认下载；可再次点击导出以取消并重试", "warning");
+      }, 60000);
+      const downloadConfirmed = await deliverMarkdown(thread, markdown, task);
+      throwIfCancelled(task);
 
       const replyCountText = `${thread.exporter.actualReplyCount} 条回复`;
+      if (!downloadConfirmed) {
+        showToast(`已请求浏览器下载：${replyCountText}，请检查下载记录`, "warning");
+        return;
+      }
+
       showToast(
         thread.exporter.complete
           ? `${action.successText}：${replyCountText}`
@@ -413,16 +431,21 @@
         showToast(error?.message || String(error), "error");
       }
     } finally {
+      if (downloadWaitTimer !== null) window.clearTimeout?.(downloadWaitTimer);
       finishExportTask(task);
-      setMenuItemBusy(sourceItem, false, action.label);
+      if (!sourceItem || runtime.export.itemTasks.get(sourceItem) === task) {
+        if (sourceItem) runtime.export.itemTasks.delete(sourceItem);
+        setMenuItemBusy(sourceItem, false, action.label);
+      }
     }
   }
 
-  function deliverMarkdown(thread, markdown) {
-    downloadText(
+  function deliverMarkdown(thread, markdown, task) {
+    return downloadText(
       buildMarkdownFileName(thread),
       markdown,
-      MIME.markdown
+      MIME.markdown,
+      task
     );
   }
 
@@ -1602,8 +1625,52 @@
     return String(text || "").replace(/([\\*_\`[\]])/g, "\\$1");
   }
 
-  function downloadText(fileName, text, type) {
+  function downloadText(fileName, text, type, task) {
     const blob = new Blob([text], { type });
+    const manager = typeof GM_info === "object" ? GM_info : null;
+    const [major, minor] = String(manager?.version || "").split(".").map(Number);
+
+    if (
+      typeof GM_download === "function" &&
+      manager?.scriptHandler === "Tampermonkey" &&
+      (major > 5 || (major === 5 && minor >= 4))
+    ) {
+      return new Promise((resolve, reject) => {
+        let settled = false;
+        let download;
+
+        function finish(error) {
+          if (settled) return;
+          settled = true;
+          clearTaskAbort(task, abortDownload);
+          if (error) reject(error);
+          else resolve(true);
+        }
+
+        function abortDownload() {
+          finish(new BceCancelledError());
+          try {
+            download?.abort?.();
+          } catch (_) {
+            // The task is already cancelled even if the manager cannot abort.
+          }
+        }
+
+        try {
+          download = GM_download({
+            url: blob,
+            name: fileName,
+            onload: () => finish(),
+            onerror: (error) => finish(new Error(formatDownloadError(error))),
+            ontimeout: () => finish(new Error("下载超时，请重试")),
+          });
+          if (!settled) bindTaskAbort(task, abortDownload);
+        } catch (error) {
+          finish(new Error(`下载启动失败：${error?.message || String(error)}`));
+        }
+      });
+    }
+
     const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
 
@@ -1614,6 +1681,19 @@
     link.remove();
 
     window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    return Promise.resolve(false);
+  }
+
+  function formatDownloadError(info) {
+    const reason = info?.error || info?.message || String(info || "未知错误");
+    const messages = {
+      not_enabled: "油猴下载功能未启用",
+      not_whitelisted: ".md 扩展名未加入油猴下载白名单",
+      not_permitted: "油猴缺少浏览器下载权限",
+      not_supported: "当前油猴或浏览器不支持下载",
+      not_succeeded: "浏览器未能启动或完成下载",
+    };
+    return `下载失败：${messages[reason] || reason}`;
   }
 
   function safeFileName(value) {

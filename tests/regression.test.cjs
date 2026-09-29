@@ -92,6 +92,7 @@ function exporter(extra = {}) {
       resolveCommentExportContext,
       ensureMenuAction,
       fetchThread,
+      runExport,
       normalizeReply,
       formatThreadMarkdown,
       buildThreadGraph,
@@ -143,29 +144,30 @@ test('BiliForge allows a reused XHR after an earlier blocked URL', () => {
   assert.equal(xhr.sent, 1);
 });
 
-test('stable 1.0.0 release keeps all public and migration userscripts aligned', () => {
+test('stable release preserves the migration copies while patching the exporter', () => {
   const primaryEcho = source('biliecho');
   const legacyEcho = source('bilibili-comment-anti-fraud-pro');
   const primaryForge = source('biliforge');
   const legacyForge = source('make-bilibili-great-again-promax');
   const exporterCode = source('bilibili-comment-thread-exporter');
 
-  for (const code of [primaryEcho, legacyEcho, primaryForge, legacyForge, exporterCode]) {
+  for (const code of [primaryEcho, legacyEcho, primaryForge, legacyForge]) {
     assert.equal(code.match(/^\/\/ @version\s+([^\s]+)$/m)?.[1], '1.0.0');
   }
+  assert.equal(exporterCode.match(/^\/\/ @version\s+([^\s]+)$/m)?.[1], '1.0.1');
 
   assert.equal(legacyEcho, primaryEcho);
   assert.equal(legacyForge, primaryForge);
   assert.match(primaryForge, /version:\s*'1\.0\.0'/);
-  assert.match(exporterCode, /version:\s*"1\.0\.0"/);
+  assert.match(exporterCode, /version:\s*"1\.0\.1"/);
 });
 
-test('README declares all three stable products as 1.0.0', () => {
+test('README declares current stable versions and the original baseline', () => {
   const readme = repoFile('README.md');
 
   assert.match(readme, /BiliForge \*\*1\.0\.0\*\*/);
   assert.match(readme, /BiliEcho \*\*1\.0\.0\*\*/);
-  assert.match(readme, /评论楼层导出器 \*\*1\.0\.0\*\*/);
+  assert.match(readme, /评论楼层导出器 \*\*1\.0\.1\*\*/);
   assert.match(readme, /1\.0\.0 是三个脚本共同的首个正式稳定基线/);
 });
 
@@ -184,7 +186,6 @@ test('README exporter version matches the userscript header', () => {
 
 test('stable exporter keeps the event-driven architecture and no legacy scanners', () => {
   const code = source('bilibili-comment-thread-exporter');
-  assert.match(code, /@version\s+1\.0\.0/);
   assert.doesNotMatch(code, /function\s+patchFetch\b/);
   assert.doesNotMatch(code, /function\s+patchXhr\b/);
   assert.doesNotMatch(code, /function\s+observePage\b/);
@@ -201,6 +202,176 @@ test('stable exporter is download-only and contains no clipboard path', () => {
   assert.doesNotMatch(code, /destination:\s*["']clipboard["']/);
   assert.match(code, /导出为 MD/);
   assert.match(code, /text\/markdown;charset=utf-8/);
+});
+
+function exporterDownloadHarness(withGmDownload = true, handler = 'Tampermonkey', version = '5.5.0') {
+  const toasts = [];
+  const timers = [];
+  const downloads = [];
+  let abortCount = 0;
+  let anchorClicks = 0;
+  const document = {
+    readyState: 'loading',
+    title: '测试视频',
+    addEventListener() {},
+    querySelector: () => null,
+    getElementById: id => toasts.find(element => element.id === id && element.isConnected),
+    createElement: tag => ({
+      tagName: tag.toUpperCase(),
+      style: {},
+      isConnected: true,
+      click() { anchorClicks += 1; },
+      remove() { this.isConnected = false; },
+    }),
+    body: {
+      appendChild(element) {
+        element.isConnected = true;
+        if (element.tagName === 'DIV') toasts.push(element);
+      },
+    },
+  };
+  class TestURL extends URL {
+    static createObjectURL() { return 'blob:test'; }
+    static revokeObjectURL() {}
+  }
+  const api = exporter({
+    Blob,
+    URL: TestURL,
+    document,
+    window: {
+      setTimeout(callback, delay) {
+        const timer = { callback, delay, cancelled: false };
+        timers.push(timer);
+        return timer;
+      },
+      clearTimeout(timer) { if (timer) timer.cancelled = true; },
+    },
+    ...(withGmDownload ? { GM_info: { scriptHandler: handler, version } } : {}),
+    ...(withGmDownload ? { GM_download(details) {
+      downloads.push(details);
+      return { abort() { abortCount += 1; } };
+    } } : {}),
+  });
+  const root = {
+    rpid_str: '1', root: 0, oid: 123, type: 1,
+    member: { mid: '9', uname: '根用户' },
+    content: { message: '根评论' },
+  };
+  api.setRequest(async () => ({ code: 0, data: { root, replies: [], page: { count: 0 } } }));
+  const context = { oid: '123', type: 1, rootId: '1', selectedReplyId: '1', seedReply: root };
+  const action = api.EXPORT_ACTIONS[0];
+
+  return {
+    api, context, action,
+    get downloadDetails() { return downloads.at(-1); },
+    get downloads() { return downloads; },
+    get abortCount() { return abortCount; },
+    get anchorClicks() { return anchorClicks; },
+    get latestToast() { return toasts.findLast(toast => toast.isConnected)?.textContent; },
+    fireTimer(delay) { timers.find(timer => timer.delay === delay && !timer.cancelled)?.callback(); },
+  };
+}
+
+test('exporter reports success only after the download completes', async () => {
+  const harness = exporterDownloadHarness();
+  const task = harness.api.runExport(harness.context, harness.action);
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.ok(harness.downloadDetails, 'Tampermonkey must receive the Markdown download');
+  assert.match(harness.downloadDetails.name, /\.md$/);
+  assert.equal(harness.downloadDetails.url instanceof Blob, true);
+  assert.doesNotMatch(harness.latestToast, /已导出/);
+
+  harness.downloadDetails.onload();
+  await task;
+  assert.match(harness.latestToast, /已导出 Markdown/);
+});
+
+test('exporter shows a download error instead of false success', async () => {
+  const harness = exporterDownloadHarness();
+  const task = harness.api.runExport(harness.context, harness.action);
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.ok(harness.downloadDetails);
+  harness.downloadDetails.onerror({ error: 'not_permitted' });
+  await task;
+  assert.match(harness.latestToast, /下载.*权限/);
+  assert.doesNotMatch(harness.latestToast, /已导出/);
+});
+
+test('exporter makes a stalled download retryable without claiming completion', async () => {
+  const harness = exporterDownloadHarness();
+  const item = {
+    style: {}, isConnected: true, textContent: '导出为 MD',
+    setAttribute(name, value) { if (name === 'aria-busy') this.busy = value; },
+  };
+  const task = harness.api.runExport(harness.context, harness.action, item);
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.ok(harness.downloadDetails);
+  harness.fireTimer(60000);
+  assert.equal(item.busy, 'false');
+  assert.equal(item.style.pointerEvents, '');
+  assert.match(harness.latestToast, /等待浏览器确认下载/);
+  assert.doesNotMatch(harness.latestToast, /已导出/);
+  harness.downloadDetails.onload();
+  await task;
+  assert.match(harness.latestToast, /已导出 Markdown/);
+});
+
+test('a new export aborts an earlier pending download and ignores its late error', async () => {
+  const harness = exporterDownloadHarness();
+  const item = {
+    style: {}, isConnected: true, textContent: '导出为 MD',
+    setAttribute(name, value) { if (name === 'aria-busy') this.busy = value; },
+  };
+  const first = harness.api.runExport(harness.context, harness.action, item);
+  await new Promise(resolve => setImmediate(resolve));
+  const oldDownload = harness.downloadDetails;
+  harness.fireTimer(60000);
+
+  const second = harness.api.runExport(harness.context, harness.action, item);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(harness.downloads.length, 2);
+  assert.equal(harness.abortCount, 1);
+  assert.equal(item.busy, 'true');
+  assert.equal(item.style.pointerEvents, 'none');
+
+  harness.downloadDetails.onload();
+  await second;
+  oldDownload.onerror({ error: 'not_succeeded' });
+  await first;
+  assert.match(harness.latestToast, /已导出 Markdown/);
+});
+
+test('exporter does not claim completion when a fallback anchor click is ignored', async () => {
+  const harness = exporterDownloadHarness(false);
+  await harness.api.runExport(harness.context, harness.action);
+
+  assert.equal(harness.anchorClicks, 1);
+  assert.doesNotMatch(harness.latestToast, /已导出/);
+});
+
+test('exporter keeps the anchor fallback for managers without Blob GM_download', async () => {
+  const harness = exporterDownloadHarness(true, 'Violentmonkey');
+  const task = harness.api.runExport(harness.context, harness.action);
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(harness.downloads.length, 0);
+  await task;
+  assert.equal(harness.anchorClicks, 1);
+  assert.doesNotMatch(harness.latestToast, /已导出/);
+});
+
+test('exporter keeps the anchor fallback for old Tampermonkey versions', async () => {
+  const harness = exporterDownloadHarness(true, 'Tampermonkey', '5.3.3');
+  const task = harness.api.runExport(harness.context, harness.action);
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(harness.downloads.length, 0);
+  await task;
+  assert.equal(harness.anchorClicks, 1);
+  assert.doesNotMatch(harness.latestToast, /已导出/);
 });
 
 test('exporter resolves the clicked root comment directly from action renderer __data', () => {
@@ -384,7 +555,7 @@ test('exporter paginates, deduplicates and flattens replies', async () => {
     seedReply: reply('3', '2'),
   });
 
-  assert.equal(result.exporter.version, '1.0.0');
+  assert.equal(result.exporter.version, '1.0.1');
   assert.equal(result.exporter.duplicateReplyCount, 1);
   assert.equal(result.exporter.complete, true);
   assert.equal(result.exporter.expectedReplyCount, 4);

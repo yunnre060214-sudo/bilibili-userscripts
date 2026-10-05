@@ -1,6 +1,6 @@
 # Bilibili Userscripts
 
-一套面向 Bilibili 网页端的 Tampermonkey 用户脚本集合。当前包含三个相互独立、可以同时安装的工具：**BiliForge** 负责整体网页体验优化，**BiliEcho** 负责评论发送后的可见性检测，**B站评论楼层导出器** 负责把完整评论楼层保存为结构清晰的 Markdown。
+一套面向 Bilibili 网页端的 Tampermonkey 用户脚本集合。当前包含四个独立工具：**BiliForge** 负责整体网页体验优化，**BiliEcho** 负责评论发送后的可见性检测，**B站评论楼层导出器** 负责保存完整评论楼层，**B站直播预言** 负责在直播页打开官方硬币预言与参与历史。
 
 ## 正式版 1.0.0
 
@@ -34,7 +34,15 @@
 
 [安装评论楼层导出器 1.0.0](https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/bilibili-comment-thread-exporter.user.js)
 
-> 新用户只应安装上面三个主文件。仓库中的 `make-bilibili-great-again-promax.user.js` 与 `bilibili-comment-anti-fraud-pro.user.js` 是旧名称迁移入口，用于让历史安装继续收到更新，不需要重复安装。
+### B站直播预言
+
+**用途：** 在直播网页直接打开当前主播的官方硬币预言和参与记录。
+
+[安装 B站直播预言 0.1.0](https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/bilibili-live-prophecy.user.js)
+
+这是新增脚本的第一版，与上面三个脚本的 1.0.0 稳定基线独立版本管理。
+
+> 新用户按需安装上面四个主文件。仓库中的 `make-bilibili-great-again-promax.user.js` 与 `bilibili-comment-anti-fraud-pro.user.js` 是旧名称迁移入口，用于让历史安装继续收到更新，不需要重复安装。
 
 ## BiliForge 1.0.0
 
@@ -150,13 +158,28 @@ BiliEcho 给出的是基于接口可见性和重新查询结果的**检测判断
 
 脚本采用事件驱动结构。正常浏览评论区时不会持续扫描整个页面，主要在用户打开评论三点菜单以及真正执行导出时工作。导出过程中通过 Bilibili 评论接口分页获取楼层回复，并执行去重、关系重建和 Markdown 渲染。
 
-## 三个脚本能否同时安装
+## B站直播预言 0.1.0
 
-可以。当前正式版已经按“三脚本共同运行”进行兼容性测试。
+安装后刷新直播间，点击右下角 **预言** 按钮。脚本自动识别当前主播，打开 B 站官方预言面板，复用 B 站网页登录状态。
+
+- **当前预言**：查看题目、选项、硬币门票与当前状态，在官方面板中选择并确认参与。
+- **参与历史**：查看官方保存的参与和结算记录；这是账号的完整预言历史。
+- **刷新**：重新加载官方面板，方便参与后回查。
+- **独立窗口打开**：用同一官方地址单独打开页面；嵌入加载或登录遇到问题时可使用。
+- **关闭**：收起面板并释放 iframe，再次打开会加载最新状态。
+
+支持数字直播间、短房间号及 `/blanc/` 页面。脚本只在顶层直播页运行，避免赛事页中的直播 iframe 重复注入。切换房间时重新识别主播，识别失败可重试，仍可打开参与历史。
+
+没有预言的直播间会显示官方页面给出的状态。账号资格、硬币数量、参与截止时间及结算结果均以官方页面为准。页面容器全屏可显示面板；浏览器原生视频全屏应退出后再打开。Escape 可在脚本面板获得焦点时关闭面板。
+
+## 脚本能否同时安装
+
+可以。前三个正式版已经按“三脚本共同运行”进行兼容性测试。新增的预言脚本使用独立 Shadow DOM 面板，不改写页面网络接口。
 
 - BiliForge 负责通用页面和网络层优化。
 - BiliEcho 只关注评论发送后的检测流程。
 - 评论楼层导出器只关注原生评论菜单与楼层导出。
+- 直播预言只负责识别房间主播和打开官方组件。
 
 其中 BiliForge 自己统一管理通用网络 Hook；另外两个脚本只在各自需要的接口和交互路径上工作。
 
@@ -174,7 +197,11 @@ BiliEcho 给出的是基于接口可见性和重新查询结果的**检测判断
 
 使用 `GM_xmlhttpRequest` 并只声明连接 `api.bilibili.com`，用于分页获取评论楼层数据。
 
-三个主脚本都没有配置第三方遥测服务器，也不需要用户填写第三方 API Key。脚本的主要网络目标是 Bilibili 自身页面、媒体资源和 API；更新文件来自本 GitHub 仓库。
+### B站直播预言
+
+仅使用 `GM_registerMenuCommand` 添加油猴菜单入口。房间识别通过公开 GET 接口且不携带账号凭据；预言与历史由 B 站官方 iframe 加载。脚本不读取、保存或上传 Cookie，也不自行调用参与接口。
+
+四个主脚本都没有配置第三方遥测服务器，也不需要用户填写第三方 API Key。脚本的主要网络目标是 Bilibili 自身页面、媒体资源和 API；更新文件来自本 GitHub 仓库。
 
 ## 兼容性与限制
 
@@ -182,6 +209,7 @@ BiliEcho 给出的是基于接口可见性和重新查询结果的**检测判断
 
 - BiliForge 与 BiliEcho 匹配 `https://*.bilibili.com/*`。
 - 评论楼层导出器匹配 `https://www.bilibili.com/video/*`。
+- 直播预言匹配 `https://live.bilibili.com/*`，排除官方组件目录，并在运行时检查房间路由。
 - 其他用户脚本管理器可能也能运行，但没有作为正式版主要验证目标。
 - Bilibili 经常调整前端 DOM、Shadow DOM、接口结构和播放器实现，依赖页面结构的功能未来可能需要跟随更新。
 - BiliEcho 无法替代官方审核信息，只能根据实际可查询结果判断。
@@ -190,7 +218,7 @@ BiliEcho 给出的是基于接口可见性和重新查询结果的**检测判断
 
 ## 自动更新
 
-三个主脚本都在头部配置了稳定的 `@updateURL` 和 `@downloadURL`。安装后，只要 Tampermonkey 正常执行更新检查，就可以从 `main` 分支获取后续版本。
+四个主脚本都在头部配置了稳定的 `@updateURL` 和 `@downloadURL`。安装后，只要 Tampermonkey 正常执行更新检查，就可以从 `main` 分支获取后续版本。
 
 如果 Raw 页面短时间仍显示旧内容，通常属于 GitHub Raw 或浏览器缓存。可以检查仓库中文件头的 `@version` 是否已经更新，再让 Tampermonkey 重新检查更新。
 
@@ -224,11 +252,23 @@ BiliEcho 源自 freedom-introvert 的 [biliSendCommAntifraud](https://github.com
 
 ## 开发与测试
 
-仓库包含无第三方依赖的 Node.js 回归测试。建议使用 Node.js 22 或更新版本：
+原有回归测试没有第三方依赖，可以直接运行。新增预言测试使用 jsdom，建议使用 Node.js 22 或更新版本：
 
 ```sh
 node --test tests/regression.test.cjs
 ```
+
+运行全部 Node 测试或只运行预言测试：
+
+```sh
+npm ci
+npm test
+npm run test:prophecy
+```
+
+预言测试执行真实脚本与 DOM 交互，覆盖房间识别、官方 iframe 与历史 URL、关闭释放、刷新、异常重试、超时和路由竞态。接口使用本地响应，不会进行硬币交易。此前已用官方网页实际参与并在刷新和历史记录中回查成功；油猴安装后的真实浏览器交互仍需在用户浏览器中验证。
+
+本次开发前已有一项失败基线：`BiliForge live quality applies the latest visibility request during menu loading`。它属于原有画质模块，预言脚本发布未修改该模块。
 
 浏览器联测使用 Playwright 和 Chromium：
 

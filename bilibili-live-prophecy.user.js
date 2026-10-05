@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站直播预言
 // @namespace    https://space.bilibili.com/1937432404
-// @version      0.1.0
+// @version      0.1.1
 // @description  在直播网页打开官方硬币预言面板，自动识别主播，查看当前预言和参与历史。
 // @author       素晴
 // @homepageURL  https://github.com/yunnre060214-sudo/bilibili-userscripts
@@ -9,15 +9,24 @@
 // @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/bilibili-live-prophecy.user.js
 // @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/bilibili-live-prophecy.user.js
 // @match        https://live.bilibili.com/*
-// @exclude      https://live.bilibili.com/p/*
-// @run-at       document-idle
-// @noframes
+// @run-at       document-start
 // @grant        GM_registerMenuCommand
+// @grant        unsafeWindow
 // ==/UserScript==
 
 (() => {
   'use strict';
 
+  // The official H5 can read account data on desktop, but showConfirm/showToast
+  // invoke an App bridge without a WEB/PC_ROOM fallback. Adapt only the UI SDK;
+  // the official account, eligibility checks, requests and participation remain.
+  if (location.pathname === '/p/html/live-app-guessing-game/index.html') {
+    if (!/BiliApp|biliLink|Android|iPhone|iPad/i.test(navigator.userAgent)) {
+      adaptOfficialDesktop(typeof unsafeWindow === 'undefined' ? window : unsafeWindow);
+    }
+    return;
+  }
+  if (location.pathname.startsWith('/p/')) return;
   if (window.top !== window.self || document.getElementById('bili-prophecy-root')) return;
 
   const OFFICIAL = 'https://live.bilibili.com/p/html/live-app-guessing-game/index.html';
@@ -29,6 +38,142 @@
   function positiveId(value) {
     const text = String(value ?? '');
     return /^[1-9]\d*$/.test(text) && Number.isSafeInteger(Number(text)) ? text : null;
+  }
+
+  function adaptOfficialDesktop(page) {
+    const key = 'webpackChunkguessing_game';
+    const queue = page[key] = page[key] || [];
+    const wrappedFactories = new WeakSet();
+    const patchedSDKs = new WeakSet();
+    let shadow = null;
+    let cancelPending = null;
+    let toastTimer = null;
+
+    function ensureRoot() {
+      if (shadow) return shadow;
+      const host = document.createElement('div');
+      host.id = 'bili-prophecy-desktop';
+      shadow = host.attachShadow({ mode: 'open' });
+      shadow.innerHTML = `<style>
+        :host { all: initial; position: fixed; top: 0; left: 0; width: 0; height: 0; z-index: 2147483647; color-scheme: light; }
+        * { box-sizing: border-box; }
+        .badge { position: fixed; top: 6px; left: 6px; background: #e5f6fd; color: #008ac5; padding: 3px 8px; border-radius: 4px; font: 11px/1.5 system-ui, sans-serif; pointer-events: none; }
+        .backdrop { position: fixed; inset: 0; display: grid; place-items: center; padding: 20px; background: #0007; }
+        .dialog { width: min(340px, 100%); background: #fff; color: #18191c; border-radius: 14px; padding: 22px; box-shadow: 0 12px 40px #0003; font: 14px/1.6 system-ui, sans-serif; }
+        h2 { margin: 0 0 12px; font-size: 17px; }
+        p { margin: 0 0 20px; white-space: pre-wrap; overflow-wrap: anywhere; }
+        .buttons { display: flex; gap: 12px; }
+        button { flex: 1; border: 0; border-radius: 8px; padding: 9px; font: inherit; cursor: pointer; background: #f1f2f3; color: #61666d; }
+        button[data-desktop-action="confirm"] { background: #00aeec; color: white; }
+        button:focus-visible { outline: 3px solid #00aeec; outline-offset: 3px; }
+        .toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); width: max-content; max-width: calc(100vw - 32px); background: #18191ce8; color: #fff; border-radius: 8px; padding: 10px 16px; font: 14px/1.5 system-ui, sans-serif; text-align: center; }
+        [hidden] { display: none !important; }
+      </style><span class="badge">桌面交互适配已启用</span><div class="toast" role="status" hidden></div>`;
+      (document.body || document.documentElement).append(host);
+      document.addEventListener('keydown', event => {
+        if (event.key === 'Escape' && cancelPending) {
+          event.preventDefault();
+          cancelPending();
+        }
+      });
+      window.addEventListener('pagehide', () => cancelPending?.());
+      return shadow;
+    }
+
+    function showModal(options = {}) {
+      cancelPending?.();
+      const root = ensureRoot();
+      const backdrop = document.createElement('div');
+      backdrop.className = 'backdrop';
+      const dialog = document.createElement('section');
+      dialog.className = 'dialog';
+      dialog.setAttribute('role', 'dialog');
+      dialog.setAttribute('aria-modal', 'true');
+      dialog.setAttribute('aria-labelledby', 'desktop-modal-title');
+      const title = document.createElement('h2');
+      title.id = 'desktop-modal-title';
+      title.textContent = options.title || '直播预言';
+      const content = document.createElement('p');
+      content.textContent = options.content || '';
+      const buttons = document.createElement('div');
+      buttons.className = 'buttons';
+      const previousFocus = document.activeElement;
+      return new Promise(resolve => {
+        let settled = false;
+        const settle = confirm => {
+          if (settled) return;
+          settled = true;
+          cancelPending = null;
+          backdrop.remove();
+          previousFocus?.focus?.();
+          const result = { confirm, cancel: !confirm, noRemind: false };
+          try {
+            if (typeof options.callback === 'function') options.callback(result);
+            if (typeof options.success === 'function') options.success(result);
+          } finally { resolve(result); }
+        };
+        cancelPending = () => settle(false);
+        for (const action of options.showCancel === false ? ['confirm'] : ['cancel', 'confirm']) {
+          const button = document.createElement('button');
+          button.type = 'button';
+          button.dataset.desktopAction = action;
+          button.textContent = action === 'confirm' ? options.confirmText || '确认' : options.cancelText || '取消';
+          button.addEventListener('click', () => settle(action === 'confirm'), { once: true });
+          buttons.append(button);
+        }
+        dialog.append(title, content, buttons);
+        backdrop.append(dialog);
+        root.append(backdrop);
+        // Default focus goes to cancellation when available; never auto-confirm.
+        buttons.querySelector('button').focus();
+      });
+    }
+
+    function showToast(options = {}) {
+      const toast = ensureRoot().querySelector('.toast');
+      toast.textContent = options.msg || options.title || '';
+      toast.hidden = false;
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => { toast.hidden = true; }, 3200);
+      return Promise.resolve({});
+    }
+
+    function patchSDK(sdk) {
+      if (!sdk || typeof sdk.showConfirm !== 'function' || typeof sdk.Request !== 'function' || patchedSDKs.has(sdk)) return;
+      if ([1, 2, 3].includes(sdk.getEnvSync?.())) return;
+      patchedSDKs.add(sdk);
+      sdk.showModal = showModal;
+      sdk.showConfirm = options => showModal({ ...options, showCancel: true });
+      sdk.showAlert = options => showModal({ ...options, showCancel: false });
+      sdk.showToast = showToast;
+      ensureRoot();
+    }
+
+    function patchChunk(record) {
+      const modules = record?.[1];
+      const factory = modules?.[1171];
+      if (typeof factory !== 'function' || wrappedFactories.has(factory)) return;
+      const wrapped = function(module, exports, require) {
+        const value = factory.call(this, module, exports, require);
+        patchSDK(exports.Ay);
+        return value;
+      };
+      wrappedFactories.add(wrapped);
+      modules[1171] = wrapped;
+    }
+
+    for (const record of queue) patchChunk(record);
+    const wrapPush = implementation => function(...records) {
+      for (const record of records) patchChunk(record);
+      return implementation.apply(this, records);
+    };
+    let push = wrapPush(queue.push);
+    // Webpack's bootstrap replaces push; keep adapting before it registers modules.
+    Object.defineProperty(queue, 'push', {
+      configurable: true,
+      get: () => push,
+      set: implementation => { push = wrapPush(implementation); },
+    });
   }
 
   function roomId() {

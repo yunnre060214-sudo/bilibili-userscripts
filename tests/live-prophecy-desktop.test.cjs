@@ -5,7 +5,27 @@ const path = require('node:path');
 const { JSDOM } = require('jsdom');
 const source = fs.readFileSync(path.join(__dirname, '..', 'bilibili-live-prophecy.user.js'), 'utf8');
 
-function setup(t, { mobile = false, existing = false } = {}) {
+function installRuntime(window, sdk) {
+  const cache = new Map();
+  const require = id => {
+    if (!cache.has(id)) {
+      const module = { exports: {} };
+      cache.set(id, module);
+      require.m[id](module, module.exports, require);
+    }
+    return cache.get(id).exports;
+  };
+  require.m = { 1171(module, exports) { exports.Ay = sdk; } };
+  const queue = window.webpackChunkguessing_game = [];
+  queue.push = record => {
+    Object.assign(require.m, record[1]);
+    record[2]?.(require);
+    return Array.prototype.push.call(queue, record);
+  };
+  return require;
+}
+
+function setup(t, { mobile = false, existing = false, cached = false } = {}) {
   const dom = new JSDOM('<!doctype html><html><body><main id="app">官方组件 fixture</main></body></html>', {
     url: 'https://live.bilibili.com/p/html/live-app-guessing-game/index.html?anchorId=353609978#/',
     runScripts: 'outside-only',
@@ -13,7 +33,7 @@ function setup(t, { mobile = false, existing = false } = {}) {
   t.after(() => dom.window.close());
   const { window } = dom;
   window.unsafeWindow = window;
-  if (mobile) Object.defineProperty(window.navigator, 'userAgent', { value: 'BiliApp iPhone' });
+  if (mobile) Object.defineProperty(window.navigator, 'userAgent', { value: 'BiliApp iPhone', configurable: true });
   const nativeConfirm = () => new Promise(() => {});
   const sdk = {
     getEnvSync: () => mobile ? 1 : -1,
@@ -24,6 +44,7 @@ function setup(t, { mobile = false, existing = false } = {}) {
   };
   const chunk = [[504], { 1171(module, exports) { exports.Ay = sdk; } }];
   window.webpackChunkguessing_game = existing ? [chunk] : [];
+  if (cached) installRuntime(window, sdk)(1171);
   window.eval(source);
   const execute = record => {
     const exports = {};
@@ -99,6 +120,66 @@ test('SDK chunks queued before the userscript runs are adapted', t => {
   const app = setup(t, { existing: true });
   app.execute(app.chunk);
   assert.notEqual(app.sdk.showConfirm, app.nativeConfirm);
+});
+
+test('an SDK evaluated before userscript injection still shows manual confirmation', async t => {
+  const app = setup(t, { cached: true });
+  assert.notEqual(app.sdk.showConfirm, app.nativeConfirm);
+  const pending = app.sdk.showConfirm({ title: '晚加载验证', content: '本地模拟' });
+  assert.match(app.root()?.querySelector('[role="dialog"]')?.textContent || '', /晚加载验证/);
+  app.button('cancel').click();
+  assert.equal((await pending).confirm, false);
+});
+
+test('a sandbox with a separate global adapts the actual page window', async t => {
+  const page = setup(t, { mobile: true });
+  Object.defineProperty(page.window.navigator, 'userAgent', { value: 'Desktop Chrome', configurable: true });
+  const sandbox = new JSDOM('<html><body></body></html>', {
+    url: page.window.location.href, runScripts: 'outside-only',
+  });
+  t.after(() => sandbox.window.close());
+  sandbox.window.unsafeWindow = page.window;
+  page.sdk.getEnvSync = () => -1;
+  installRuntime(page.window, page.sdk)(1171);
+  sandbox.window.eval(source);
+  assert.notEqual(page.sdk.showConfirm, page.nativeConfirm);
+  const pending = page.sdk.showConfirm({ title: '页面窗口', content: '在实际页面内显示' });
+  assert.ok(page.root()?.querySelector('[role="dialog"]'));
+  assert.equal(sandbox.window.document.getElementById('bili-prophecy-desktop'), null);
+  page.button('cancel').click();
+  await pending;
+});
+
+test('the room page repairs an iframe where the userscript did not run', async t => {
+  const page = setup(t, { mobile: true });
+  Object.defineProperty(page.window.navigator, 'userAgent', { value: 'Desktop Chrome', configurable: true });
+  page.sdk.getEnvSync = () => -1;
+  installRuntime(page.window, page.sdk)(1171);
+  const parent = new JSDOM('<html><body>直播页</body></html>', {
+    url: 'https://live.bilibili.com/13233348', runScripts: 'outside-only',
+  });
+  t.after(() => parent.window.close());
+  parent.window.unsafeWindow = parent.window;
+  parent.window.fetch = async () => ({ ok: true, json: async () => ({ code: 0, data: { uid: 353609978 } }) });
+  parent.window.eval(source);
+  await new Promise(resolve => setImmediate(resolve));
+  const root = parent.window.document.getElementById('bili-prophecy-root').shadowRoot;
+  root.querySelector('[data-action="toggle"]').click();
+  const frame = root.querySelector('iframe');
+  Object.defineProperty(frame, 'contentWindow', { value: page.window });
+  frame.dispatchEvent(new parent.window.Event('load'));
+  assert.notEqual(page.sdk.showConfirm, page.nativeConfirm);
+  assert.ok(page.root());
+  const confirmation = page.sdk.showConfirm;
+  frame.dispatchEvent(new parent.window.Event('load'));
+  assert.equal(page.sdk.showConfirm, confirmation);
+  assert.equal(page.window.document.querySelectorAll('#bili-prophecy-desktop').length, 1);
+  assert.match(root.querySelector('.hint').textContent, /桌面适配已启用/);
+  assert.equal(parent.window.document.getElementById('bili-prophecy-desktop'), null);
+  const pending = page.sdk.showConfirm({ title: 'iframe 后备适配', content: '本地测试' });
+  assert.ok(page.root().querySelector('[role="dialog"]'));
+  page.button('cancel').click();
+  await pending;
 });
 
 test('confirmation text is rendered as text rather than HTML', async t => {

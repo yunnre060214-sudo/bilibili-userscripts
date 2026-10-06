@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站直播预言
 // @namespace    https://space.bilibili.com/1937432404
-// @version      0.1.1
+// @version      0.1.2
 // @description  在直播网页打开官方硬币预言面板，自动识别主播，查看当前预言和参与历史。
 // @author       素晴
 // @homepageURL  https://github.com/yunnre060214-sudo/bilibili-userscripts
@@ -16,6 +16,8 @@
 
 (() => {
   'use strict';
+
+  const VERSION = '0.1.2';
 
   // The official H5 can read account data on desktop, but showConfirm/showToast
   // invoke an App bridge without a WEB/PC_ROOM fallback. Adapt only the UI SDK;
@@ -41,17 +43,27 @@
   }
 
   function adaptOfficialDesktop(page) {
+    if (/BiliApp|biliLink|Android|iPhone|iPad/i.test(page.navigator.userAgent)) return null;
+    const marker = '__biliProphecyDesktopAdapter__';
+    if (page[marker]?.version === VERSION) {
+      page[marker].probe();
+      return page[marker];
+    }
+    const doc = page.document;
     const key = 'webpackChunkguessing_game';
     const queue = page[key] = page[key] || [];
     const wrappedFactories = new WeakSet();
     const patchedSDKs = new WeakSet();
+    const adapter = { version: VERSION, status: 'waiting', probe: probeCurrentSDK };
+    page[marker] = adapter;
     let shadow = null;
     let cancelPending = null;
     let toastTimer = null;
 
     function ensureRoot() {
       if (shadow) return shadow;
-      const host = document.createElement('div');
+      if (!doc.documentElement) return null;
+      const host = doc.createElement('div');
       host.id = 'bili-prophecy-desktop';
       shadow = host.attachShadow({ mode: 'open' });
       shadow.innerHTML = `<style>
@@ -68,37 +80,44 @@
         button:focus-visible { outline: 3px solid #00aeec; outline-offset: 3px; }
         .toast { position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); width: max-content; max-width: calc(100vw - 32px); background: #18191ce8; color: #fff; border-radius: 8px; padding: 10px 16px; font: 14px/1.5 system-ui, sans-serif; text-align: center; }
         [hidden] { display: none !important; }
-      </style><span class="badge">桌面交互适配已启用</span><div class="toast" role="status" hidden></div>`;
-      (document.body || document.documentElement).append(host);
-      document.addEventListener('keydown', event => {
+      </style><span class="badge"></span><div class="toast" role="status" hidden></div>`;
+      updateBadge();
+      (doc.body || doc.documentElement).append(host);
+      doc.addEventListener('keydown', event => {
         if (event.key === 'Escape' && cancelPending) {
           event.preventDefault();
           cancelPending();
         }
       });
-      window.addEventListener('pagehide', () => cancelPending?.());
+      page.addEventListener('pagehide', () => cancelPending?.());
       return shadow;
+    }
+
+    function updateBadge() {
+      if (!shadow) return;
+      shadow.querySelector('.badge').textContent = adapter.status === 'ready'
+        ? `桌面交互适配已启用 v${VERSION}` : `桌面适配 v${VERSION}：等待官方组件`;
     }
 
     function showModal(options = {}) {
       cancelPending?.();
       const root = ensureRoot();
-      const backdrop = document.createElement('div');
+      const backdrop = doc.createElement('div');
       backdrop.className = 'backdrop';
-      const dialog = document.createElement('section');
+      const dialog = doc.createElement('section');
       dialog.className = 'dialog';
       dialog.setAttribute('role', 'dialog');
       dialog.setAttribute('aria-modal', 'true');
       dialog.setAttribute('aria-labelledby', 'desktop-modal-title');
-      const title = document.createElement('h2');
+      const title = doc.createElement('h2');
       title.id = 'desktop-modal-title';
       title.textContent = options.title || '直播预言';
-      const content = document.createElement('p');
+      const content = doc.createElement('p');
       content.textContent = options.content || '';
-      const buttons = document.createElement('div');
+      const buttons = doc.createElement('div');
       buttons.className = 'buttons';
-      const previousFocus = document.activeElement;
-      return new Promise(resolve => {
+      const previousFocus = doc.activeElement;
+      return new page.Promise(resolve => {
         let settled = false;
         const settle = confirm => {
           if (settled) return;
@@ -114,7 +133,7 @@
         };
         cancelPending = () => settle(false);
         for (const action of options.showCancel === false ? ['confirm'] : ['cancel', 'confirm']) {
-          const button = document.createElement('button');
+          const button = doc.createElement('button');
           button.type = 'button';
           button.dataset.desktopAction = action;
           button.textContent = action === 'confirm' ? options.confirmText || '确认' : options.cancelText || '取消';
@@ -133,9 +152,9 @@
       const toast = ensureRoot().querySelector('.toast');
       toast.textContent = options.msg || options.title || '';
       toast.hidden = false;
-      clearTimeout(toastTimer);
-      toastTimer = setTimeout(() => { toast.hidden = true; }, 3200);
-      return Promise.resolve({});
+      page.clearTimeout(toastTimer);
+      toastTimer = page.setTimeout(() => { toast.hidden = true; }, 3200);
+      return page.Promise.resolve({});
     }
 
     function patchSDK(sdk) {
@@ -146,7 +165,9 @@
       sdk.showConfirm = options => showModal({ ...options, showCancel: true });
       sdk.showAlert = options => showModal({ ...options, showCancel: false });
       sdk.showToast = showToast;
+      adapter.status = 'ready';
       ensureRoot();
+      updateBadge();
     }
 
     function patchChunk(record) {
@@ -174,6 +195,22 @@
       get: () => push,
       set: implementation => { push = wrapPush(implementation); },
     });
+
+    function probeCurrentSDK() {
+      // A userscript can run after Webpack has cached the SDK. Merely wrapping
+      // its factory then has no effect. A local runtime chunk exposes the same
+      // require function so we can adapt the existing export without a reload.
+      queue.push([[
+        `bili-prophecy-desktop-${VERSION}-${Date.now()}-${Math.random()}`,
+      ], {}, require => {
+        if (typeof require?.m?.[1171] === 'function') patchSDK(require(1171).Ay);
+      }]);
+    }
+
+    ensureRoot();
+    if (!shadow) doc.addEventListener('DOMContentLoaded', ensureRoot, { once: true });
+    probeCurrentSDK();
+    return adapter;
   }
 
   function roomId() {
@@ -247,7 +284,7 @@
         <div class="content"></div>
         <div class="message" role="status" hidden><p></p><button class="retry" data-action="retry" hidden>重新识别主播</button></div>
         <footer><button data-action="refresh">刷新</button><a data-action="external" target="_blank" rel="noopener noreferrer">独立窗口打开</a></footer>
-        <p class="hint">在官方面板中选择并确认；参与后可到历史查看记录。</p>
+        <p class="hint">v${VERSION}：在官方面板中选择并确认；参与后可到历史查看记录。</p>
       </section>`;
 
     const find = selector => shadow.querySelector(selector);
@@ -257,6 +294,7 @@
       status: find('.message p'), retry: find('[data-action="retry"]'),
       launcher: find('[data-action="toggle"]'), external: find('[data-action="external"]'),
       room: find('.room'), current: find('[data-action="current"]'), history: find('[data-action="history"]'),
+      hint: find('.hint'),
     };
     shadow.addEventListener('click', event => {
       const action = event.target.closest?.('[data-action]')?.dataset.action;
@@ -324,6 +362,24 @@
     frame.title = ui.view === 'history' ? '官方预言参与历史' : '官方直播预言';
     frame.src = officialUrl();
     frame.referrerPolicy = 'strict-origin-when-cross-origin';
+    ui.hint.textContent = `v${VERSION}：正在加载桌面适配…`;
+    frame.addEventListener('load', () => {
+      if (!ui || !frame.isConnected || ui.content.firstChild !== frame) return;
+      try {
+        // Same-origin fallback: some userscript managers skip dynamic frames
+        // or inject after startup. The parent can also repair the loaded SDK.
+        const page = typeof unsafeWindow === 'undefined' ? window : unsafeWindow;
+        const child = page.document.getElementById(ROOT_ID)?.shadowRoot?.querySelector('iframe')?.contentWindow;
+        if (!child) throw new Error('missing frame');
+        if (child.location.origin !== location.origin || child.location.pathname !== new URL(OFFICIAL).pathname) throw new Error('unexpected frame');
+        const adapter = adaptOfficialDesktop(child);
+        ui.hint.textContent = adapter?.status === 'ready'
+          ? `v${VERSION}：桌面适配已启用，在官方面板中选择并确认。`
+          : `v${VERSION}：未检测到桌面适配，请用独立窗口打开并查看左上角状态。`;
+      } catch {
+        ui.hint.textContent = `v${VERSION}：无法连接官方面板，请用独立窗口打开。`;
+      }
+    });
     ui.content.append(frame);
   }
 

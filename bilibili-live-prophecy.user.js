@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         B站直播预言
 // @namespace    https://space.bilibili.com/1937432404
-// @version      0.2.2
-// @description  在直播网页打开官方硬币预言面板，自动识别主播，查看当前预言和参与历史。
+// @version      0.3.0
+// @description  在弹幕输入框上方添加预言按钮，独立打开当前主播的官方预言与参与历史，适配桌面交互。
 // @author       素晴
 // @homepageURL  https://github.com/yunnre060214-sudo/bilibili-userscripts
 // @supportURL   https://github.com/yunnre060214-sudo/bilibili-userscripts/issues
@@ -17,7 +17,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.2.2';
+  const VERSION = '0.3.0';
 
   // The official H5 can read account data on desktop, but showConfirm/showToast
   // invoke an App bridge without a WEB/PC_ROOM fallback. Adapt only the UI SDK;
@@ -29,13 +29,17 @@
     return;
   }
   if (location.pathname.startsWith('/p/')) return;
-  if (window.top !== window.self || document.getElementById('bili-prophecy-root')) return;
+  const instance = Symbol.for('bili-prophecy-room-entry');
+  if (document[instance] || document.getElementById('bili-prophecy-root')) return;
+  document[instance] = true;
 
   const OFFICIAL = 'https://live.bilibili.com/p/html/live-app-guessing-game/index.html';
   const ROOT_ID = 'bili-prophecy-root';
   let state = null;
   let ui = null;
   let poll = null;
+  let observer = null;
+  let active = true;
 
   function positiveId(value) {
     const text = String(value ?? '');
@@ -359,257 +363,77 @@
     return match ? positiveId(match[1]) : null;
   }
 
-  function officialUrl(view = ui?.view || 'current') {
+  function officialUrl() {
     const url = new URL(OFFICIAL);
-    if (state?.anchorId) url.searchParams.set('anchorId', state.anchorId);
-    url.hash = view === 'history' ? '/history' : '/';
+    url.searchParams.set('anchorId', state.anchorId);
+    url.hash = '/';
     return url.href;
   }
 
   function placeRoot() {
-    if (!ui) return;
-    // Container fullscreen can contain an overlay; a native video element cannot.
-    const fullscreen = document.fullscreenElement;
-    const parent = fullscreen && !/^(VIDEO|IFRAME)$/.test(fullscreen.tagName)
-      ? fullscreen : document.body;
-    if (parent && ui.host.parentNode !== parent) parent.append(ui.host);
+    if (!active || !ui || !state) return;
+    // Keep the entry inside the native controls, including when Vue replaces them.
+    // The connected fast path avoids scanning the DOM for each incoming danmaku.
+    if (ui.host.isConnected && ui.host.parentNode === ui.mountPoint) return;
+    const toolbar = document.querySelector('#chat-control-panel-vm .control-panel-icon-row, .chat-control-panel .control-panel-icon-row');
+    if (!toolbar) return;
+    const left = toolbar.querySelector(':scope > .icon-left-part');
+    ui.mountPoint = left || toolbar;
+    ui.host.dataset.placement = left ? 'left' : 'toolbar';
+    if (left) left.append(ui.host);
+    else toolbar.prepend(ui.host);
   }
 
   function createUI() {
     const host = document.createElement('div');
     host.id = ROOT_ID;
     const shadow = host.attachShadow({ mode: 'open' });
-    shadow.innerHTML = `
-      <style>
-        :host { all: initial; display: block; position: fixed; width: 0; height: 0; z-index: 2147483647; color-scheme: light; --ink: #18191c; --muted: #637083; --blue: #00aeec; --wash: linear-gradient(120deg, #fcedf2, #f2eef8 48%, #e6f7fd); --accent: linear-gradient(90deg, #fb7299, #ae9cdb 48%, #00aeec); font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
-        * { box-sizing: border-box; }
-        [hidden] { display: none !important; }
-        button, a { font: inherit; -webkit-tap-highlight-color: transparent; }
-        button { cursor: pointer; transition: background .15s, box-shadow .15s, transform .15s; }
-        button:focus-visible, a:focus-visible { outline: 2px solid #aa9ad9; outline-offset: 2px; }
-        svg { flex-shrink: 0; }
-        .launcher { position: fixed; right: 24px; bottom: 142px; display: flex; align-items: center; gap: 7px; height: 42px; padding: 0 13px 0 9px; border: 1px solid transparent; border-radius: 13px;
-          color: #3f4c5d; background: linear-gradient(115deg, #fff8fa, #fbf9fe 48%, #f0fbff) padding-box, linear-gradient(115deg, #efb5cb, #c5b9e5 48%, #8ed5ea) border-box; box-shadow: 0 4px 14px #1c334518; font-size: 13px; font-weight: 650; }
-        .launcher:hover { transform: translateY(-1px); box-shadow: 0 5px 18px #1c334522; }
-        .launcher:active { transform: translateY(0); }
-        .launcher[aria-expanded="true"] { color: #007ba5; background: linear-gradient(115deg, #fff5f9, #f7f3fc 48%, #eaf9ff) padding-box, var(--accent) border-box; }
-        .launcher-mark { display: grid; place-items: center; width: 24px; height: 24px; color: #0084b0; background: linear-gradient(135deg, #fce7ef, #ece8f8 48%, #ddf4fd); border-radius: 8px; }
-        .panel { position: fixed; right: 24px; bottom: 198px; width: min(448px, calc(100vw - 32px));
-          height: min(728px, calc(100vh - 222px)); height: min(728px, calc(100dvh - 222px)); min-height: 240px;
-          display: flex; flex-direction: column; overflow: hidden; border: 1px solid #dfe3e9; border-radius: 16px;
-          background: #fff; color: var(--ink); box-shadow: 0 18px 48px #0f172e2e; font-size: 14px; line-height: 1.5; animation: panel-in .2s ease-out; }
-        header { display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; gap: 10px; padding: 16px 18px; background: var(--wash); border-bottom: 1px solid #e0e4ea; }
-        .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
-        .brand-copy { min-width: 0; }
-        .brand-mark { flex-shrink: 0; width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid #ffffffb3; border-radius: 10px; color: #0084b0; background: #ffffff80; }
-        h2 { margin: 0; font-size: 16px; font-weight: 750; line-height: 1.4; }
-        .close { flex-shrink: 0; display: grid; place-items: center; width: 30px; height: 30px; border: 0; background: transparent; color: #61666d; border-radius: 8px; }
-        .close:hover { color: #3f4c5d; background: #0000000d; }
-        .room-chip { display: flex; align-items: center; gap: 5px; margin-top: 3px; color: #637083; font-size: 11px; }
-        .room { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
-        nav { display: flex; flex-shrink: 0; gap: 9px; margin: 14px 16px 12px; }
-        nav button { display: flex; align-items: center; justify-content: center; gap: 7px; flex: 1; min-height: 36px; padding: 7px 10px; border: 1px solid #e0e4ea; border-radius: 10px; background: #fff; color: #637083; font-size: 13px; font-weight: 600; }
-        nav button:hover { background: #fafbfc; }
-        nav button[aria-pressed="true"] { background: linear-gradient(115deg, #effaff, #f4f5ff); color: #007ba5; border-color: #b9e1f2; font-weight: 650; }
-        nav button[data-action="history"][aria-pressed="true"] { background: linear-gradient(115deg, #fff2f7, #f9f3ff); color: #b33568; border-color: #f3b8ce; }
-        .accent-line { flex-shrink: 0; height: 3px; margin: 0 16px 12px; border-radius: 8px; background: var(--accent); }
-        .viewport { flex: 1; min-height: 0; position: relative; overflow: hidden; border-top: 1px solid #eef0f3; border-bottom: 1px solid #e5e7eb; background: #fafbfc; }
-        .content { height: 100%; overflow: hidden; }
-        .content iframe { width: 100%; height: 100%; display: block; border: 0; background: #fafbfc; }
-        .message { height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; padding: 28px; text-align: center; color: #8896a7; }
-        .message-mark { display: grid; place-items: center; width: 48px; height: 48px; margin-bottom: 16px; border: 1px solid #dce4ef; border-radius: 14px; color: #0084b0; background: var(--wash); }
-        .message[data-state="error"] .message-mark { color: #d49a70; background: #fcf4ec; border-color: #f4e5d7; }
-        .message-title { font-size: 15px; color: #556579; margin-bottom: 9px; }
-        .message p { margin: 0 0 20px; max-width: 280px; font-size: 12px; line-height: 1.9; }
-        .retry { display: flex; align-items: center; gap: 7px; border: 1px solid #b9e1f2; border-radius: 10px; background: #fff; color: #007ba5; padding: 9px 16px; font-size: 12px; font-weight: 650; }
-        .retry:hover { background: #effaff; }
-        .loading-view { position: absolute; inset: 0; padding: 20px 16px; background: #fafbfc; overflow: hidden; }
-        .loading-caption { display: flex; align-items: center; gap: 8px; margin: 0 0 18px; font-size: 12px; color: #8c9aab; }
-        .spinner { width: 13px; height: 13px; border: 2px solid #dce9f4; border-top-color: #00aeec; border-radius: 50%; animation: spin 1s linear infinite; }
-        .skeleton-card { padding: 16px; margin-bottom: 14px; background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; }
-        .skeleton-line { height: 12px; border-radius: 4px; background: #edf1f6; width: 75%; margin-bottom: 12px; animation: pulse 1.4s ease-in-out infinite; }
-        .skeleton-line.short { width: 42%; height: 8px; margin-bottom: 20px; }
-        .skeleton-options { display: flex; gap: 16px; margin-bottom: 16px; }
-        .skeleton-options span { flex: 1; height: 60px; border-radius: 10px; background: linear-gradient(120deg, #edfaff, #f3f5ff); }
-        .skeleton-options span + span { background: linear-gradient(120deg, #fff1f6, #f9f3ff); }
-        .skeleton-bar { height: 9px; border-radius: 5px; background: linear-gradient(90deg, #d9effa 60%, #f7dfeb 60%); }
-        footer { flex-shrink: 0; padding: 10px 16px; background: #fff; }
-        .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-        .connection { display: flex; align-items: center; gap: 6px; color: #7b8b9e; font-size: 11px; white-space: nowrap; }
-        .connection::before { content: ""; flex-shrink: 0; width: 6px; height: 6px; border-radius: 50%; background: #b4c1ce; }
-        .connection[data-state="ready"] { color: #4a7b69; }
-        .connection[data-state="ready"]::before { background: #29b28c; box-shadow: 0 0 0 3px #29b28c10; }
-        .connection[data-state="loading"]::before { background: #78bce0; }
-        .connection[data-state="warning"] { color: #b08b64; }
-        .connection[data-state="warning"]::before { background: #d4a771; }
-        .tools { display: flex; align-items: center; gap: 7px; }
-        footer button, footer a { display: flex; align-items: center; gap: 5px; min-height: 30px; border: 1px solid #b9e1f2; border-radius: 9px; padding: 5px 8px; background: #fff; color: #007ba5; text-decoration: none; font-size: 11px; font-weight: 600; white-space: nowrap; }
-        footer a { border-color: #f3b8ce; color: #b33568; }
-        footer button:hover { background: #effaff; }
-        footer a:hover { background: #fff2f7; }
-        footer a[aria-disabled="true"] { color: #b1bcc8; pointer-events: none; }
-        .footnote { display: flex; align-items: flex-start; gap: 10px; justify-content: space-between; margin-top: 5px; }
-        .hint { flex: 1; margin: 0; color: #63758b; font-size: 10px; line-height: 1.7; }
-        .version { color: #65758b; font-size: 10px; font-variant-numeric: tabular-nums; padding-top: 1px; }
-        @keyframes panel-in { from { opacity: 0; transform: translateY(8px); } }
-        @keyframes spin { to { transform: rotate(360deg); } }
-        @keyframes pulse { 50% { opacity: .45; } }
-        @media (max-width: 540px), (max-height: 640px) {
-          .launcher { right: 14px; bottom: 20px; height: 42px; }
-          .panel { right: 14px; bottom: 76px; width: min(448px, calc(100vw - 28px)); height: calc(100vh - 100px); height: calc(100dvh - 100px); min-height: 180px; border-radius: 16px; }
-          header { padding: 14px 16px; }
-          nav { margin-top: 12px; }
-          footer { padding: 11px 16px; }
-        }
-        @media (max-height: 420px) { header { padding: 10px 16px; } h2 { font-size: 15px; } .room-chip, .footnote { display: none; } nav { margin-top: 10px; margin-bottom: 10px; } .accent-line { margin-bottom: 10px; } }
-        @media (prefers-reduced-motion: reduce) { *, *::before { animation: none !important; transition: none !important; } }
-      </style>
-      <button class="launcher" data-action="toggle" aria-expanded="false" aria-controls="prophecy-panel" title="打开当前直播间的官方预言"><span class="launcher-mark">${icon('spark', 17)}</span><span>预言</span></button>
-      <section class="panel" id="prophecy-panel" role="dialog" aria-label="B站直播预言" hidden>
-        <header><div class="brand"><span class="brand-mark">${icon('spark', 18)}</span><div class="brand-copy"><h2>直播预言</h2><div class="room-chip">${icon('room', 12)}<span class="room"></span></div></div></div><button class="close" data-action="close" aria-label="关闭预言面板" title="收起面板">${icon('close', 16)}</button></header>
-        <nav aria-label="预言页面">
-          <button data-action="current" aria-pressed="true">${icon('spark', 16)}当前预言</button>
-          <button data-action="history" aria-pressed="false">${icon('history', 16)}参与历史</button>
-        </nav>
-        <div class="accent-line" aria-hidden="true"></div>
-        <div class="viewport">
-          <div class="content" aria-busy="false"></div>
-          <div class="message" role="status" hidden><span class="message-mark">${icon('signal', 28)}</span><strong class="message-title">正在连接直播间</strong><p></p><button class="retry" data-action="retry" hidden>${icon('refresh', 14)}重新识别主播</button></div>
-          <div class="loading-view" role="status" hidden><div class="loading-caption"><span class="spinner" aria-hidden="true"></span><span>正在打开预言…</span></div><div aria-hidden="true"><div class="skeleton-card"><div class="skeleton-line"></div><div class="skeleton-line short"></div><div class="skeleton-options"><span></span><span></span></div><div class="skeleton-bar"></div></div><div class="skeleton-card"><div class="skeleton-line"></div><div class="skeleton-line short"></div><div class="skeleton-options"><span></span><span></span></div><div class="skeleton-bar"></div></div></div></div>
-        </div>
-        <footer><div class="toolbar"><span class="connection" data-state="waiting" role="status">正在连接</span><div class="tools"><button data-action="refresh" title="重新加载预言">${icon('refresh', 13)}刷新</button><a data-action="external" target="_blank" rel="noopener noreferrer">独立窗口${icon('external', 12)}</a></div></div><div class="footnote"><p class="hint">在卡片中选择答案，确认后参与预言。</p><span class="version">v${VERSION}</span></div></footer>
-      </section>`;
-
-    const find = selector => shadow.querySelector(selector);
-    ui = {
-      host, shadow, open: false, view: 'current',
-      panel: find('.panel'), content: find('.content'), message: find('.message'),
-      status: find('.message p'), retry: find('[data-action="retry"]'),
-      launcher: find('[data-action="toggle"]'), external: find('[data-action="external"]'),
-      room: find('.room'), current: find('[data-action="current"]'), history: find('[data-action="history"]'),
-      hint: find('.hint'),
-      connection: find('.connection'), loader: find('.loading-view'), loaderCaption: find('.loading-caption > span:last-child'),
-      messageTitle: find('.message-title'), loadTimer: null,
-    };
-    shadow.addEventListener('click', event => {
-      const action = event.target.closest?.('[data-action]')?.dataset.action;
-      if (!action) return;
-      const previousState = state;
-      syncRoute();
-      if (action === 'external') {
-        // Revalidate synchronously so a SPA navigation cannot open a stale owner.
-        if (!ui || state !== previousState || !ui.external.hasAttribute('href')) event.preventDefault();
-        return;
-      }
-      if (!ui) return;
-      if (action === 'toggle') setOpen(!ui.open);
-      else if (action === 'close') setOpen(false);
-      else if (action === 'current' || action === 'history') {
-        ui.view = action;
-        render();
-      } else if (action === 'retry') lookup(state);
-      else if (action === 'refresh') {
-        if (!state.anchorId && ui.view === 'current') lookup(state);
-        else render();
-      }
+    shadow.innerHTML = `<style>
+      :host { all: initial; display: inline-flex; flex: 0 0 auto; align-self: center; vertical-align: middle; height: 28px; margin-left: 4px; color-scheme: light; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+      :host([data-placement="toolbar"]) { float: left; }
+      * { box-sizing: border-box; }
+      button { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; gap: 3px; width: 51px; height: 28px; padding: 0 5px; border: 1px solid transparent; border-radius: 8px; color: #3f4c5d; background: linear-gradient(115deg, #fff8fa, #fbf9fe 48%, #f0fbff) padding-box, linear-gradient(115deg, #efb5cb, #c5b9e5 48%, #8ed5ea) border-box; font: inherit; font-size: 11px; font-weight: 650; line-height: 1; letter-spacing: 0; white-space: nowrap; cursor: pointer; -webkit-tap-highlight-color: transparent; transition: background .15s, box-shadow .15s; }
+      svg { flex-shrink: 0; color: #0084b0; }
+      button:hover:not(:disabled) { background: linear-gradient(115deg, #fff2f7, #f7f2fc 48%, #eaf9ff) padding-box, linear-gradient(115deg, #fb7299, #ae9cdb 48%, #00aeec) border-box; box-shadow: 0 2px 8px #1c334518; }
+      button:active:not(:disabled) { box-shadow: inset 0 1px 3px #1c334514; }
+      button:focus-visible { outline: 2px solid #aa9ad9; outline-offset: 2px; }
+      button:disabled { opacity: .6; cursor: wait; }
+      button[data-state="error"] { color: #a06444; }
+      @media (prefers-reduced-motion: reduce) { button { transition: none; } }
+    </style><button type="button" data-action="open" aria-label="在独立窗口打开直播预言">${icon('spark', 14)}<span>预言</span></button>`;
+    const button = shadow.querySelector('button');
+    ui = { host, button, mountPoint: null };
+    button.addEventListener('click', event => {
+      event.stopPropagation();
+      openPrediction();
     });
+    renderEntry();
     placeRoot();
   }
 
-  function setOpen(open) {
-    if (!ui) return;
-    ui.open = open;
-    ui.panel.hidden = !open;
-    ui.launcher.setAttribute('aria-expanded', String(open));
-    if (open) {
-      render();
-      ui.current.focus();
-    } else {
-      clearTimeout(ui.loadTimer);
-      ui.loadTimer = null;
-      ui.loader.hidden = true;
-      ui.content.setAttribute('aria-busy', 'false');
-      ui.content.replaceChildren();
-      ui.launcher.focus();
-    }
+  function renderEntry() {
+    if (!ui || !state) return;
+    const loading = state.status === 'loading';
+    ui.button.disabled = loading;
+    ui.button.dataset.state = state.status;
+    ui.button.setAttribute('aria-busy', String(loading));
+    ui.button.setAttribute('aria-label', state.status === 'error' ? '主播识别失败，点击重试' : '在独立窗口打开直播预言');
+    ui.button.title = loading ? '正在识别当前主播…'
+      : state.status === 'error' ? `${state.error} 点击重试。`
+      : `在独立窗口打开当前主播的预言 · v${VERSION}`;
   }
 
-  function render() {
-    if (!ui || !state) return;
-    clearTimeout(ui.loadTimer);
-    ui.loadTimer = null;
-    ui.loader.hidden = true;
-    ui.content.setAttribute('aria-busy', 'false');
-    ui.room.textContent = `当前直播间 ${state.roomId}`;
-    ui.current.setAttribute('aria-pressed', String(ui.view === 'current'));
-    ui.history.setAttribute('aria-pressed', String(ui.view === 'history'));
-    const canLoad = ui.view === 'history' || Boolean(state.anchorId);
-    if (canLoad) {
-      ui.external.href = officialUrl();
-      ui.external.removeAttribute('aria-disabled');
-      ui.external.removeAttribute('tabindex');
-    } else {
-      ui.external.removeAttribute('href');
-      ui.external.setAttribute('aria-disabled', 'true');
-      ui.external.setAttribute('tabindex', '-1');
+  function openPrediction() {
+    // Recheck synchronously in case the SPA route changed before the timer ran.
+    syncRoute();
+    if (!state || state.status === 'loading') return;
+    if (state.status === 'error') {
+      lookup(state);
+      return;
     }
-    ui.content.replaceChildren();
-    ui.message.hidden = canLoad;
-    ui.content.hidden = !canLoad;
-    ui.retry.hidden = state.status !== 'error';
-    ui.message.dataset.state = state.status;
-    ui.messageTitle.textContent = state.status === 'error' ? '暂时未能连接主播' : '正在连接直播间';
-    ui.status.textContent = state.status === 'error'
-      ? `${state.error} 可重试，或先查看参与历史。` : '正在识别当前主播…';
-    ui.connection.dataset.state = state.status === 'error' ? 'warning' : 'waiting';
-    ui.connection.textContent = state.status === 'error' ? '连接待恢复' : '正在连接';
-    if (!ui.open || !canLoad) return;
-
-    const frame = document.createElement('iframe');
-    frame.title = ui.view === 'history' ? '官方预言参与历史' : '官方直播预言';
-    frame.src = officialUrl();
-    frame.referrerPolicy = 'strict-origin-when-cross-origin';
-    ui.hint.textContent = '正在连接官方预言，请稍候。';
-    ui.connection.dataset.state = 'loading';
-    ui.connection.textContent = '正在加载';
-    ui.loader.hidden = false;
-    ui.loaderCaption.textContent = ui.view === 'history' ? '正在打开参与历史…' : '正在打开预言…';
-    ui.content.setAttribute('aria-busy', 'true');
-    ui.loadTimer = setTimeout(() => {
-      if (!ui || !frame.isConnected || ui.content.firstChild !== frame) return;
-      ui.loader.hidden = true;
-      ui.content.setAttribute('aria-busy', 'false');
-      ui.connection.dataset.state = 'warning';
-      ui.connection.textContent = '加载较慢';
-      ui.hint.textContent = '加载时间较长，可刷新或用独立窗口打开。';
-      ui.loadTimer = null;
-    }, 15000);
-    frame.addEventListener('load', () => {
-      if (!ui || !frame.isConnected || ui.content.firstChild !== frame) return;
-      clearTimeout(ui.loadTimer);
-      ui.loadTimer = null;
-      ui.loader.hidden = true;
-      ui.content.setAttribute('aria-busy', 'false');
-      try {
-        // Same-origin fallback: some userscript managers skip dynamic frames
-        // or inject after startup. The parent can also repair the loaded SDK.
-        const page = typeof unsafeWindow === 'undefined' ? window : unsafeWindow;
-        const child = page.document.getElementById(ROOT_ID)?.shadowRoot?.querySelector('iframe')?.contentWindow;
-        if (!child) throw new Error('missing frame');
-        if (child.location.origin !== location.origin || child.location.pathname !== new URL(OFFICIAL).pathname) throw new Error('unexpected frame');
-        const adapter = adaptOfficialDesktop(child);
-        ui.connection.dataset.state = adapter?.status === 'ready' ? 'ready' : 'warning';
-        ui.connection.textContent = adapter?.status === 'ready' ? '已连接' : '交互待就绪';
-        ui.hint.textContent = adapter?.status === 'ready'
-          ? '桌面适配已启用，在卡片中选择答案并确认。'
-          : '交互暂未就绪，可用独立窗口打开查看状态。';
-      } catch {
-        ui.connection.dataset.state = 'warning';
-        ui.connection.textContent = '连接待恢复';
-        ui.hint.textContent = '无法连接官方面板，可用独立窗口打开。';
-      }
-    });
-    ui.content.append(frame);
+    if (!positiveId(state.anchorId)) return;
+    // Stay inside the user gesture. Browser preferences choose a new tab/window.
+    window.open(officialUrl(), '_blank', 'noopener,noreferrer');
   }
 
   async function lookup(target) {
@@ -619,7 +443,7 @@
     target.controller = controller;
     target.status = 'loading';
     target.error = '';
-    render();
+    renderEntry();
     const timeout = setTimeout(() => controller.abort(), 8000);
     try {
       const url = new URL('https://api.live.bilibili.com/room/v1/Room/room_init');
@@ -629,15 +453,15 @@
       const payload = await response.json();
       const uid = positiveId(payload?.data?.uid);
       if (payload.code !== 0 || !uid) throw new Error('room lookup invalid response');
-      if (state !== target || target.controller !== controller || roomId() !== target.roomId) return;
+      if (!active || controller.signal.aborted || state !== target || target.controller !== controller || roomId() !== target.roomId) return;
       target.anchorId = uid;
       target.status = 'ready';
-      render();
+      renderEntry();
     } catch {
-      if (state !== target || target.controller !== controller || roomId() !== target.roomId) return;
+      if (!active || state !== target || target.controller !== controller || roomId() !== target.roomId) return;
       target.status = 'error';
       target.error = controller.signal.aborted ? '主播识别超时。' : '暂时无法识别主播。';
-      render();
+      renderEntry();
     } finally {
       clearTimeout(timeout);
       if (target.controller === controller) target.controller = null;
@@ -647,51 +471,43 @@
   function syncRoute() {
     const id = roomId();
     if (id === state?.roomId) {
-      // Some room layouts replace their body contents after navigation.
       placeRoot();
       return;
     }
     state?.controller?.abort();
     state = id ? { roomId: id, anchorId: null, status: 'loading', error: '', controller: null } : null;
     if (!state) {
-      clearTimeout(ui?.loadTimer);
       ui?.host.remove();
       ui = null;
       return;
     }
     if (!ui) createUI();
-    else ui.view = 'current';
     lookup(state);
   }
 
   function start() {
+    active = true;
+    if (!observer) {
+      observer = new MutationObserver(placeRoot);
+      observer.observe(document, { childList: true, subtree: true });
+    }
     syncRoute();
     if (state && state.status !== 'ready' && (!state.controller || state.controller.signal.aborted)) lookup(state);
     if (poll === null) poll = setInterval(syncRoute, 1000);
   }
 
-  document.addEventListener('keydown', event => {
-    if (event.key === 'Escape' && ui?.open) setOpen(false);
-  });
-  document.addEventListener('fullscreenchange', placeRoot);
   window.addEventListener('popstate', syncRoute);
   window.addEventListener('pageshow', start);
   window.addEventListener('pagehide', () => {
-    clearTimeout(ui?.loadTimer);
-    if (ui) {
-      ui.loadTimer = null;
-      ui.loader.hidden = true;
-      ui.content.setAttribute('aria-busy', 'false');
-    }
+    active = false;
+    observer?.disconnect();
+    observer = null;
     clearInterval(poll);
     poll = null;
     state?.controller?.abort();
   });
   if (typeof GM_registerMenuCommand === 'function') {
-    GM_registerMenuCommand('打开直播预言', () => {
-      syncRoute();
-      if (ui) setOpen(true);
-    });
+    GM_registerMenuCommand('打开直播预言', openPrediction);
   }
   start();
 })();

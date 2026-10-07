@@ -187,38 +187,6 @@ test('a sandbox with a separate global adapts the actual page window', async t =
   await pending;
 });
 
-test('the room page repairs an iframe where the userscript did not run', async t => {
-  const page = setup(t, { mobile: true });
-  Object.defineProperty(page.window.navigator, 'userAgent', { value: 'Desktop Chrome', configurable: true });
-  page.sdk.getEnvSync = () => -1;
-  installRuntime(page.window, page.sdk)(1171);
-  const parent = new JSDOM('<html><body>直播页</body></html>', {
-    url: 'https://live.bilibili.com/13233348', runScripts: 'outside-only',
-  });
-  t.after(() => parent.window.close());
-  parent.window.unsafeWindow = parent.window;
-  parent.window.fetch = async () => ({ ok: true, json: async () => ({ code: 0, data: { uid: 353609978 } }) });
-  parent.window.eval(source);
-  await new Promise(resolve => setImmediate(resolve));
-  const root = parent.window.document.getElementById('bili-prophecy-root').shadowRoot;
-  root.querySelector('[data-action="toggle"]').click();
-  const frame = root.querySelector('iframe');
-  Object.defineProperty(frame, 'contentWindow', { value: page.window });
-  frame.dispatchEvent(new parent.window.Event('load'));
-  assert.notEqual(page.sdk.showConfirm, page.nativeConfirm);
-  assert.ok(page.root());
-  const confirmation = page.sdk.showConfirm;
-  frame.dispatchEvent(new parent.window.Event('load'));
-  assert.equal(page.sdk.showConfirm, confirmation);
-  assert.equal(page.window.document.querySelectorAll('#bili-prophecy-desktop').length, 1);
-  assert.match(root.querySelector('.hint').textContent, /桌面适配已启用/);
-  assert.equal(parent.window.document.getElementById('bili-prophecy-desktop'), null);
-  const pending = page.sdk.showConfirm({ title: 'iframe 后备适配', content: '本地测试' });
-  assert.ok(page.root().querySelector('[role="dialog"]'));
-  page.button('cancel').click();
-  await pending;
-});
-
 test('confirmation text is rendered as text rather than HTML', async t => {
   const app = setup(t);
   app.load();

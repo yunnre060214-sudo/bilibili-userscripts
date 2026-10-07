@@ -90,6 +90,23 @@ test('cancel and Escape never confirm participation', async t => {
   assert.equal((await escape).confirm, false);
 });
 
+test('Tab and Shift+Tab keep keyboard focus inside the confirmation dialog', async t => {
+  const app = setup(t);
+  app.load();
+  const pending = app.sdk.showConfirm({ title: '键盘导航', content: '本地测试' });
+  app.button('confirm').focus();
+  const forward = new app.window.KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+  app.window.document.dispatchEvent(forward);
+  assert.equal(forward.defaultPrevented, true);
+  assert.equal(app.root().activeElement, app.button('cancel'));
+  const backward = new app.window.KeyboardEvent('keydown', { key: 'Tab', shiftKey: true, bubbles: true, cancelable: true });
+  app.window.document.dispatchEvent(backward);
+  assert.equal(backward.defaultPrevented, true);
+  assert.equal(app.root().activeElement, app.button('confirm'));
+  app.button('cancel').click();
+  await pending;
+});
+
 test('the adapter preserves the official request and account implementations', t => {
   const app = setup(t);
   const request = app.sdk.Request, userInfo = app.sdk.getUserInfo;

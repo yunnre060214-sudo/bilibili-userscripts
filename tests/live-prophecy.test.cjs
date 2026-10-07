@@ -109,6 +109,54 @@ test('history and refresh each load one fresh official iframe', async t => {
   assert.equal(app.root().querySelector('iframe').src, `${official}?anchorId=353609978#/`);
 });
 
+test('loading feedback clears only when the current official frame has loaded', async t => {
+  const app = setup(t);
+  await flush();
+  app.button('toggle').click();
+  assert.equal(app.root().querySelector('.loading-view')?.hidden, false);
+  assert.equal(app.root().querySelector('.content').getAttribute('aria-busy'), 'true');
+  const old = app.root().querySelector('iframe');
+  app.button('history').click();
+  old.dispatchEvent(new app.window.Event('load'));
+  assert.equal(app.root().querySelector('.loading-view').hidden, false);
+  app.root().querySelector('iframe').dispatchEvent(new app.window.Event('load'));
+  assert.equal(app.root().querySelector('.loading-view').hidden, true);
+  assert.equal(app.root().querySelector('.content').getAttribute('aria-busy'), 'false');
+});
+
+test('a slow official frame stops obscuring content and offers a recovery message', async t => {
+  const app = setup(t);
+  await flush();
+  app.button('toggle').click();
+  app.timeout(15000);
+  assert.equal(app.root().querySelector('.loading-view')?.hidden, true);
+  assert.equal(app.root().querySelector('.content').getAttribute('aria-busy'), 'false');
+  assert.match(app.root().querySelector('.hint').textContent, /刷新|独立窗口/);
+  assert.equal(app.root().querySelector('.connection').dataset.state, 'warning');
+});
+
+test('closing during frame loading cancels its late loading feedback', async t => {
+  const app = setup(t);
+  await flush();
+  app.button('toggle').click();
+  assert.equal(app.root().querySelector('.loading-view')?.hidden, false);
+  app.button('close').click();
+  const hint = app.root().querySelector('.hint').textContent;
+  app.timeout(15000);
+  assert.equal(app.root().querySelector('.hint').textContent, hint);
+});
+
+test('leaving and restoring the page cannot leave a loading overlay over the official frame', async t => {
+  const app = setup(t);
+  await flush();
+  app.button('toggle').click();
+  assert.equal(app.root().querySelector('.loading-view').hidden, false);
+  app.window.dispatchEvent(new app.window.Event('pagehide'));
+  app.window.dispatchEvent(new app.window.Event('pageshow'));
+  assert.equal(app.root().querySelector('.loading-view').hidden, true);
+  assert.equal(app.root().querySelector('.content').getAttribute('aria-busy'), 'false');
+});
+
 for (const route of ['/', '/p/html/live-app-guessing-game/index.html?anchorId=353609978', '/123/not-a-room', '/blanc/0']) {
   test(`does not inject into non-room route ${route}`, async t => {
     const app = setup(t, { url: `https://live.bilibili.com${route}` });

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站直播预言
 // @namespace    https://space.bilibili.com/1937432404
-// @version      0.2.0
+// @version      0.2.1
 // @description  在直播网页打开官方硬币预言面板，自动识别主播，查看当前预言和参与历史。
 // @author       素晴
 // @homepageURL  https://github.com/yunnre060214-sudo/bilibili-userscripts
@@ -17,7 +17,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.2.0';
+  const VERSION = '0.2.1';
 
   // The official H5 can read account data on desktop, but showConfirm/showToast
   // invoke an App bridge without a WEB/PC_ROOM fallback. Adapt only the UI SDK;
@@ -105,6 +105,8 @@
         @media (prefers-reduced-motion: reduce) { *, *::before { animation: none !important; transition: none !important; } }
         [hidden] { display: none !important; }
       </style><span class="badge"></span><div class="toast" role="status" hidden>${icon('signal', 18)}<span></span></div>`;
+      // The room panel already shows adapter status; keep its cards clear.
+      shadow.querySelector('.badge').hidden = page.top !== page.self;
       updateBadge();
       installOfficialTheme();
       (doc.body || doc.documentElement).append(host);
@@ -137,6 +139,7 @@
     function installOfficialTheme() {
       if (doc.getElementById('bili-prophecy-theme')) return;
       doc.documentElement.dataset.biliProphecyDesktop = '';
+      doc.documentElement.toggleAttribute('data-bili-prophecy-embedded', page.top !== page.self);
       const style = doc.createElement('style');
       style.id = 'bili-prophecy-theme';
       // Scope to the official desktop document and its existing component
@@ -150,41 +153,58 @@
         html[data-bili-prophecy-desktop] .content[data-v-00192e7f] { width: 100%; padding: 42px 16px 12px; box-sizing: border-box; }
         html[data-bili-prophecy-desktop] .content[data-v-7569cb0e] { padding: 0 4px 2px; align-items: flex-start; }
         html[data-bili-prophecy-desktop] .content[data-v-7569cb0e] > .title { font-size: 13px; color: #526378; font-weight: 600; }
-        html[data-bili-prophecy-desktop] .sub-title { color: #8693a4; font-size: 12px; margin-top: 7px; margin-left: 0; }
+        html[data-bili-prophecy-desktop] .sub-title { color: #63758b; font-size: 12px; margin-top: 7px; margin-left: 0; }
         html[data-bili-prophecy-desktop] .tip { opacity: .5; right: 4px; filter: grayscale(1) brightness(.6); }
         html[data-bili-prophecy-desktop] .mb20 { margin-bottom: 16px; }
         html[data-bili-prophecy-desktop] .content-prohets-box,
         html[data-bili-prophecy-desktop] .item-content { height: auto; min-height: 0; border: 1px solid #e5ebf3; background: #fff; padding: 16px; margin-bottom: 14px; border-radius: 16px; box-shadow: 0 4px 14px #2a496506; }
         html[data-bili-prophecy-desktop] .content-prohets-box .title,
         html[data-bili-prophecy-desktop] .item-content .title { color: #273449; flex: 1; min-width: 0; font-size: 16px; line-height: 1.6; font-weight: 650; overflow-wrap: anywhere; }
-        html[data-bili-prophecy-desktop] .text-line { min-height: 40px; height: auto; padding: 10px 0 12px; gap: 8px; }
+        html[data-bili-prophecy-desktop] .text-line { min-height: 0; height: auto; padding: 0 0 14px; gap: 12px; align-items: flex-start; }
+        html[data-bili-prophecy-desktop] .text-line > .line,
+        html[data-bili-prophecy-desktop] .tick-block { flex-shrink: 0; margin-top: 3px; }
         html[data-bili-prophecy-desktop] .tickey,
         html[data-bili-prophecy-desktop] .sub-info,
-        html[data-bili-prophecy-desktop] .count { color: #8a97a7; font-size: 12px; }
+        html[data-bili-prophecy-desktop] .count { color: #63758b; font-size: 12px; }
         html[data-bili-prophecy-desktop] .text-line .count-time { color: #008dbe; font-size: 12px; font-variant-numeric: tabular-nums; }
+        /* The official card centers this row without a width. Flex children
+           then shrink to their text, leaving two narrow vertical buttons. */
+        html[data-bili-prophecy-desktop] .content-prohets-box > .line.mt8 { display: grid; grid-template-columns: minmax(0, 1fr) 22px minmax(0, 1fr); align-items: stretch; gap: 10px; width: 100%; margin-top: 0; }
         html[data-bili-prophecy-desktop] .bigbox { flex: 1; width: auto; min-width: 0; height: auto; }
-        html[data-bili-prophecy-desktop] .box { width: 100%; height: auto; min-height: 68px; border-radius: 12px; opacity: 1; border: 1px solid #dcecf4; background: #eef8fd !important; transition: box-shadow .15s, transform .15s; }
+        html[data-bili-prophecy-desktop] .box { width: 100%; height: 100%; min-height: 68px; border-radius: 12px; opacity: 1; border: 1px solid #dcecf4; background: #eef8fd !important; transition: box-shadow .15s, transform .15s; }
         html[data-bili-prophecy-desktop] .bigbox:last-child .box { border-color: #f4dfe8; background: #fff3f8 !important; }
-        html[data-bili-prophecy-desktop] .box .count-time { color: #1685b3; font-size: 16px; font-weight: 650; line-height: 1.45; overflow-wrap: anywhere; }
-        html[data-bili-prophecy-desktop] .bigbox:last-child .box .count-time { color: #c74e7f; }
-        html[data-bili-prophecy-desktop] .box .sub-score { color: #7a8c9e; font-size: 10px; line-height: 1.5; transform: none; margin-top: 5px; }
+        html[data-bili-prophecy-desktop] .box .count-time { position: relative; max-width: 100%; color: #08769d; font-size: 16px; font-weight: 650; line-height: 1.45; text-align: center; overflow-wrap: anywhere; }
+        html[data-bili-prophecy-desktop] .bigbox:last-child .box .count-time { color: #b63f70; }
+        html[data-bili-prophecy-desktop] .box .sub-score { color: #5e7085; font-size: 10px; line-height: 1.5; transform: none; margin-top: 5px; }
         html[data-bili-prophecy-desktop] .box.selected { border: 2px solid #00aeec; box-shadow: 0 0 0 3px #00aeec15; }
         html[data-bili-prophecy-desktop] .bigbox:last-child .box.selected { border-color: #f69; box-shadow: 0 0 0 3px #ff669915; }
-        html[data-bili-prophecy-desktop] .box.unselected { opacity: .65; }
-        html[data-bili-prophecy-desktop] .block { min-height: 66px; padding: 12px 6px; cursor: pointer; box-sizing: border-box; }
-        html[data-bili-prophecy-desktop] .box:hover { box-shadow: 0 4px 12px #1d8db317; transform: translateY(-1px); }
-        html[data-bili-prophecy-desktop] .box .icon { height: 30px; left: 5px; top: 4px; opacity: .45; }
-        html[data-bili-prophecy-desktop] .vs { width: 22px; margin: 0 8px; opacity: .5; filter: grayscale(1) brightness(.6); }
-        html[data-bili-prophecy-desktop] .pk { width: 100%; height: 18px; margin-top: 14px; }
+        html[data-bili-prophecy-desktop] .box.unselected { opacity: 1; }
+        html[data-bili-prophecy-desktop] .content-prohets-box > .line:has(.box.selected) .box.unselected { opacity: .72; }
+        html[data-bili-prophecy-desktop] .block { min-height: 66px; padding: 12px 26px; cursor: default; box-sizing: border-box; }
+        html[data-bili-prophecy-desktop] .content-prohets-box:has(.tick-block .count-time):not(:has(.box.selected)) .block { cursor: pointer; }
+        html[data-bili-prophecy-desktop] .content-prohets-box:has(.tick-block .count-time):not(:has(.box.selected)) .box:hover { box-shadow: 0 4px 12px #1d8db317; transform: translateY(-1px); }
+        html[data-bili-prophecy-desktop] .box .icon { height: 22px; left: 7px; top: 7px; opacity: .7; }
+        html[data-bili-prophecy-desktop] .vs { width: 22px; margin: 0; align-self: center; opacity: .65; filter: grayscale(1) brightness(.6); }
+        html[data-bili-prophecy-desktop] .pk { width: 100%; height: 14px; margin-top: 14px; }
         html[data-bili-prophecy-desktop] .content-pkline { font-variant-numeric: tabular-nums; }
-        html[data-bili-prophecy-desktop] .user-game-footer { height: 76px; background: #fffffff5; border-top: 1px solid #e5ebf3; padding: 16px 20px; backdrop-filter: blur(10px); box-shadow: 0 -4px 14px #2a496503; }
+        html[data-bili-prophecy-desktop] .pk .left,
+        html[data-bili-prophecy-desktop] .pk .right { font: 10px/14px system-ui, sans-serif; }
+        html[data-bili-prophecy-desktop] .pk .left { color: #033a4f; font-weight: 600; }
+        html[data-bili-prophecy-desktop] .pk .right { color: #571930; font-weight: 600; }
+        html[data-bili-prophecy-desktop] .pk .trangle { width: 10px; }
+        html[data-bili-prophecy-desktop] .pk .trangle .blue { border-bottom-width: 14px; border-right-width: 10px; }
+        html[data-bili-prophecy-desktop] .pk .trangle .pink { border-top-width: 14px; border-left-width: 10px; }
+        html[data-bili-prophecy-desktop] .user-game-footer { display: flex; align-items: center; height: 58px; background: #fffffff5; border-top: 1px solid #e5ebf3; padding: 12px 16px; backdrop-filter: blur(10px); box-shadow: 0 -4px 14px #2a496503; }
+        html[data-bili-prophecy-desktop] .user-game-footer > .line { width: 100%; gap: 8px; }
         html[data-bili-prophecy-desktop] .user-game-footer .left { color: #273449; }
         html[data-bili-prophecy-desktop] .user-game-footer .right,
-        html[data-bili-prophecy-desktop] .get-heart { color: #8292a5; font-size: 11px; }
-        html[data-bili-prophecy-desktop] .heart-num { color: #008dbe; font-size: 19px; font-weight: 700; font-variant-numeric: tabular-nums; }
-        html[data-bili-prophecy-desktop] .h80 { height: 80px; flex-shrink: 0; }
+        html[data-bili-prophecy-desktop] .get-heart { color: #65758b; font-size: 11px; }
+        html[data-bili-prophecy-desktop] .user-game-footer .heart { width: 18px; opacity: .75; }
+        html[data-bili-prophecy-desktop] .heart-num { color: #008dbe; font-size: 18px; line-height: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+        html[data-bili-prophecy-desktop] .h80 { height: 64px; flex-shrink: 0; }
+        html[data-bili-prophecy-desktop] .item-content .title-line { align-items: flex-start; gap: 10px; }
         html[data-bili-prophecy-desktop] .item-content .sub,
-        html[data-bili-prophecy-desktop] .item-content .gary { color: #8795a6; }
+        html[data-bili-prophecy-desktop] .item-content .gary { color: #63758b; }
         html[data-bili-prophecy-desktop] .item-content .text-content,
         html[data-bili-prophecy-desktop] .item-content .white { color: #516075; }
         html[data-bili-prophecy-desktop] .header[data-v-00192e7f] .title { color: #526378; font-size: 13px; font-weight: 600; }
@@ -192,6 +212,9 @@
         html[data-bili-prophecy-desktop] .empty-content .sub { color: #8593a5; max-width: 270px; line-height: 1.8; }
         html[data-bili-prophecy-desktop] .loading p { color: #526378; }
         @media (min-width: 560px) { html[data-bili-prophecy-desktop] .user-detail-content, html[data-bili-prophecy-desktop] .content[data-v-00192e7f] { max-width: 680px; margin: 0 auto; padding-top: 54px; } html[data-bili-prophecy-desktop] .user-game-footer { max-width: 680px; left: 50%; transform: translateX(-50%); border-radius: 16px 16px 0 0; } }
+        html[data-bili-prophecy-desktop][data-bili-prophecy-embedded] .user-detail-content,
+        html[data-bili-prophecy-desktop][data-bili-prophecy-embedded] .content[data-v-00192e7f] { padding-top: 12px; }
+        @media (max-width: 340px) { html[data-bili-prophecy-desktop] .content-prohets-box, html[data-bili-prophecy-desktop] .item-content { padding: 12px; } html[data-bili-prophecy-desktop] .text-line { gap: 8px; } html[data-bili-prophecy-desktop] .block { padding-left: 14px; padding-right: 14px; } }
         @media (prefers-reduced-motion: reduce) { html[data-bili-prophecy-desktop] .box { transition: none; } }
       `.replaceAll('html[data-bili-prophecy-desktop]', 'html[data-bili-prophecy-desktop]:has(.user-detail-content, .content[data-v-00192e7f])');
       (doc.head || doc.documentElement).append(style);
@@ -365,22 +388,22 @@
           display: flex; flex-direction: column; overflow: hidden; border: 1px solid #e1e8f1; border-radius: 22px;
           background: #fff; color: var(--ink); box-shadow: 0 22px 70px #1f38552b, 0 3px 12px #1f385514; font-size: 14px; line-height: 1.5; animation: panel-in .2s ease-out; }
         .panel::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: linear-gradient(90deg, #00aeec 5%, #79c9f5 65%, #ff9cbe); }
-        header { display: flex; align-items: flex-start; justify-content: space-between; padding: 24px 22px 14px; background: radial-gradient(ellipse at 100% 0, #f0faff, transparent 70%); }
+        header { display: flex; flex-shrink: 0; align-items: flex-start; justify-content: space-between; padding: 20px 20px 10px; background: radial-gradient(ellipse at 100% 0, #f0faff, transparent 70%); }
         .brand { display: flex; align-items: center; gap: 12px; }
-        .brand-mark { width: 46px; height: 46px; display: grid; place-items: center; border: 1px solid #dceff8; border-radius: 15px; color: #009ed6; background: linear-gradient(140deg, #e9f9ff, #f2f6ff); }
-        .eyebrow { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; color: #8b99a9; font-size: 10px; font-weight: 600; letter-spacing: .1em; }
+        .brand-mark { width: 42px; height: 42px; display: grid; place-items: center; border: 1px solid #dceff8; border-radius: 14px; color: #009ed6; background: linear-gradient(140deg, #e9f9ff, #f2f6ff); }
+        .eyebrow { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; color: #63758b; font-size: 10px; font-weight: 600; letter-spacing: .1em; }
         .live-dot { width: 5px; height: 5px; border-radius: 50%; background: #ff82ab; }
-        h2 { margin: 0; font-size: 22px; font-weight: 720; line-height: 1.3; letter-spacing: .02em; }
+        h2 { margin: 0; font-size: 20px; font-weight: 720; line-height: 1.3; letter-spacing: .02em; }
         .close { display: grid; place-items: center; width: 32px; height: 32px; margin-top: -2px; border: 1px solid #e9eef5; background: #ffffffb3; color: #94a1b0; border-radius: 10px; }
         .close:hover { color: #526479; background: #f1f5f9; }
-        .room-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 22px 18px; }
-        .room-chip { display: flex; align-items: center; gap: 6px; color: #7f8fa3; font-size: 11px; }
+        .room-row { display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; gap: 8px; padding: 0 20px 12px; }
+        .room-chip { display: flex; align-items: center; gap: 6px; color: #6f8097; font-size: 11px; }
         .room { font-variant-numeric: tabular-nums; }
-        .source { color: #829aae; background: #f4f8fc; border: 1px solid #e9f0f6; border-radius: 6px; padding: 3px 7px; font-size: 10px; }
-        nav { display: flex; flex-shrink: 0; gap: 4px; margin: 0 20px 18px; padding: 4px; border: 1px solid #edf1f6; border-radius: 13px; background: #f3f6fa; }
-        nav button { display: flex; align-items: center; justify-content: center; gap: 8px; flex: 1; min-height: 39px; padding: 8px 10px; border: 1px solid transparent; border-radius: 10px; background: transparent; color: #8794a5; font-size: 13px; font-weight: 550; }
+        .source { color: #5f728a; background: #f4f8fc; border: 1px solid #e9f0f6; border-radius: 6px; padding: 3px 7px; font-size: 10px; }
+        nav { display: flex; flex-shrink: 0; gap: 4px; margin: 0 18px 12px; padding: 4px; border: 1px solid #edf1f6; border-radius: 13px; background: #f3f6fa; }
+        nav button { display: flex; align-items: center; justify-content: center; gap: 8px; flex: 1; min-height: 37px; padding: 7px 10px; border: 1px solid transparent; border-radius: 10px; background: transparent; color: #5e7088; font-size: 13px; font-weight: 550; }
         nav button:hover { color: #4f6c84; background: #ffffff70; }
-        nav button[aria-pressed="true"] { background: #fff; color: #009ccd; border-color: #e2eaf3; font-weight: 650; box-shadow: 0 2px 5px #1e395508; }
+        nav button[aria-pressed="true"] { background: #fff; color: #007ba5; border-color: #e2eaf3; font-weight: 650; box-shadow: 0 2px 5px #1e395508; }
         .viewport { flex: 1; min-height: 0; position: relative; overflow: hidden; border-top: 1px solid #edf1f6; border-bottom: 1px solid #edf1f6; background: #f5f7fb; }
         .content { height: 100%; overflow: hidden; }
         .content iframe { width: 100%; height: 100%; display: block; border: 0; background: #f5f7fb; }
@@ -401,22 +424,22 @@
         .skeleton-options span { flex: 1; height: 60px; border-radius: 10px; background: #eef7fc; }
         .skeleton-options span + span { background: #fcf1f7; }
         .skeleton-bar { height: 9px; border-radius: 5px; background: linear-gradient(90deg, #d9effa 60%, #f7dfeb 60%); }
-        footer { flex-shrink: 0; padding: 14px 20px 13px; background: #fff; }
+        footer { flex-shrink: 0; padding: 10px 16px; background: #fff; }
         .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-        .connection { display: flex; align-items: center; gap: 6px; color: #8b98a9; font-size: 11px; }
-        .connection::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: #b4c1ce; }
-        .connection[data-state="ready"] { color: #6c998c; }
+        .connection { display: flex; align-items: center; gap: 6px; color: #7b8b9e; font-size: 11px; white-space: nowrap; }
+        .connection::before { content: ""; flex-shrink: 0; width: 6px; height: 6px; border-radius: 50%; background: #b4c1ce; }
+        .connection[data-state="ready"] { color: #4a7b69; }
         .connection[data-state="ready"]::before { background: #29b28c; box-shadow: 0 0 0 3px #29b28c10; }
         .connection[data-state="loading"]::before { background: #78bce0; }
         .connection[data-state="warning"] { color: #b08b64; }
         .connection[data-state="warning"]::before { background: #d4a771; }
-        .tools { display: flex; align-items: center; gap: 12px; }
-        footer button, footer a { display: flex; align-items: center; gap: 5px; border: 0; padding: 4px 0; background: transparent; color: #6e8aa3; text-decoration: none; font-size: 11px; }
-        footer button:hover, footer a:hover { color: #009ed6; }
+        .tools { display: flex; align-items: center; gap: 3px; }
+        footer button, footer a { display: flex; align-items: center; gap: 5px; min-height: 30px; border: 0; border-radius: 7px; padding: 6px 7px; background: transparent; color: #617e98; text-decoration: none; font-size: 11px; white-space: nowrap; }
+        footer button:hover, footer a:hover { color: #009ed6; background: #f0f8fc; }
         footer a[aria-disabled="true"] { color: #b1bcc8; pointer-events: none; }
-        .footnote { display: flex; align-items: flex-start; gap: 10px; justify-content: space-between; margin-top: 9px; }
-        .hint { flex: 1; margin: 0; color: #99a5b4; font-size: 10px; line-height: 1.7; }
-        .version { color: #b8c2cd; font-size: 10px; font-variant-numeric: tabular-nums; padding-top: 1px; }
+        .footnote { display: flex; align-items: flex-start; gap: 10px; justify-content: space-between; margin-top: 5px; }
+        .hint { flex: 1; margin: 0; color: #63758b; font-size: 10px; line-height: 1.7; }
+        .version { color: #65758b; font-size: 10px; font-variant-numeric: tabular-nums; padding-top: 1px; }
         @keyframes panel-in { from { opacity: 0; transform: translateY(8px); } }
         @keyframes spin { to { transform: rotate(360deg); } }
         @keyframes pulse { 50% { opacity: .45; } }

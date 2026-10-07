@@ -79,6 +79,26 @@ test('desktop confirmation opens a real dialog and resolves only after manual co
   assert.equal(app.root().querySelector('[role="dialog"]'), null);
 });
 
+test('an embedded official page hides the duplicate badge and still opens confirmation', async t => {
+  const parent = new JSDOM('<!doctype html><iframe src="https://live.bilibili.com/p/html/live-app-guessing-game/index.html?anchorId=353609978#/"></iframe>', {
+    url: 'https://live.bilibili.com/13233348', runScripts: 'outside-only',
+  });
+  t.after(() => parent.window.close());
+  const page = parent.window.document.querySelector('iframe').contentWindow;
+  page.document.write('<!doctype html><html><body><main id="app">官方组件 fixture</main></body></html>');
+  page.document.close();
+  page.unsafeWindow = page;
+  const sdk = { getEnvSync: () => -1, showConfirm: () => new Promise(() => {}), Request: function OfficialRequest() {} };
+  installRuntime(page, sdk)(1171);
+  page.eval(source);
+  const root = page.document.getElementById('bili-prophecy-desktop').shadowRoot;
+  assert.equal(root.querySelector('.badge').hidden, true);
+  const pending = sdk.showConfirm({ title: '嵌入页确认', content: '不能' });
+  assert.equal(root.querySelector('[role="dialog"] h2').textContent, '嵌入页确认');
+  root.querySelector('[data-desktop-action="cancel"]').click();
+  assert.equal((await pending).confirm, false);
+});
+
 test('cancel and Escape never confirm participation', async t => {
   const app = setup(t);
   app.load();

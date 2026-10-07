@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站直播预言
 // @namespace    https://space.bilibili.com/1937432404
-// @version      0.2.1
+// @version      0.2.2
 // @description  在直播网页打开官方硬币预言面板，自动识别主播，查看当前预言和参与历史。
 // @author       素晴
 // @homepageURL  https://github.com/yunnre060214-sudo/bilibili-userscripts
@@ -17,7 +17,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.2.1';
+  const VERSION = '0.2.2';
 
   // The official H5 can read account data on desktop, but showConfirm/showToast
   // invoke an App bridge without a WEB/PC_ROOM fallback. Adapt only the UI SDK;
@@ -86,20 +86,23 @@
         .badge::before { content: ""; display: inline-block; width: 5px; height: 5px; margin: 0 5px 1px 0; border-radius: 50%; background: #a7b7c3; }
         .badge[data-ready="true"]::before { background: #25b38b; }
         .backdrop { position: fixed; inset: 0; display: grid; place-items: center; padding: 22px; background: #14233969; backdrop-filter: blur(6px); animation: veil-in .16s ease-out; }
-        .dialog { width: min(364px, 100%); max-height: calc(100dvh - 44px); overflow: auto; background: #fff; color: #202d3c; border: 1px solid #fff; border-radius: 22px; padding: 26px; box-shadow: 0 22px 70px #14233933; font-size: 14px; line-height: 1.65; animation: dialog-in .2s ease-out; }
-        .dialog-mark { display: grid; place-items: center; width: 48px; height: 48px; margin-bottom: 16px; color: #00a0d6; background: linear-gradient(140deg, #e4f8ff, #eef5ff); border: 1px solid #dceff8; border-radius: 16px; }
-        .dialog-eyebrow { margin-bottom: 6px; color: #8492a3; font-size: 11px; font-weight: 600; letter-spacing: .12em; }
-        h2 { margin: 0 0 16px; font-size: 20px; font-weight: 700; line-height: 1.5; overflow-wrap: anywhere; }
-        p { margin: 0 0 22px; padding: 16px; color: #526276; background: #f5f8fb; border: 1px solid #edf1f6; border-radius: 12px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.85; }
-        .buttons { display: flex; gap: 10px; }
-        button { flex: 1; min-width: 0; border: 1px solid #e4eaf1; border-radius: 11px; padding: 11px 8px; font: inherit; font-weight: 600; cursor: pointer; background: #fff; color: #617187; transition: background .15s, transform .15s; }
-        button:hover { background: #f3f6fa; }
+        .dialog { width: min(364px, 100%); max-height: calc(100dvh - 44px); overflow: auto; background: #fff; color: #18191c; border: 1px solid #dfe3e9; border-radius: 16px; padding: 0; box-shadow: 0 18px 48px #0f172e2e; font-size: 14px; line-height: 1.65; animation: dialog-in .2s ease-out; }
+        .dialog-head { display: flex; align-items: flex-start; gap: 10px; padding: 16px 18px; background: linear-gradient(120deg, #fcedf2, #f2eef8 48%, #e6f7fd); border-bottom: 1px solid #e0e4ea; }
+        .dialog-mark { display: grid; place-items: center; flex-shrink: 0; width: 30px; height: 30px; margin-top: 2px; color: #0084b0; border: 1px solid #ffffffb3; border-radius: 10px; background: #ffffff80; }
+        .dialog-heading { min-width: 0; }
+        .dialog-eyebrow { margin-bottom: 3px; color: #637083; font-size: 11px; }
+        h2 { margin: 0; font-size: 16px; font-weight: 700; line-height: 1.55; overflow-wrap: anywhere; }
+        p { margin: 18px 18px 14px; padding: 12px; color: #3f4c5d; background: #f6f7f8; border: 1px solid #e5e7eb; border-radius: 12px; font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.85; }
+        .dialog-accent { height: 3px; margin: 0 18px; border-radius: 8px; background: linear-gradient(90deg, #fb7299, #ae9cdb 48%, #00aeec); }
+        .buttons { display: flex; gap: 9px; padding: 16px 18px 18px; }
+        button { flex: 1; min-width: 0; min-height: 36px; border: 1px solid #b9e1f2; border-radius: 10px; padding: 8px; font: inherit; font-size: 13px; font-weight: 650; cursor: pointer; background: #fff; color: #007ba5; transition: background .15s, transform .15s; }
+        button:hover { background: #f0faff; }
         button:active { transform: translateY(1px); }
-        button[data-desktop-action="confirm"] { border-color: #00a8e1; background: linear-gradient(110deg, #00aeec, #159bdd); color: white; box-shadow: 0 4px 12px #00aeec26; }
-        button[data-desktop-action="confirm"]:hover { background: #009ed7; }
-        button:focus-visible { outline: 3px solid #00aeec70; outline-offset: 3px; }
-        .toast { position: fixed; display: flex; align-items: center; gap: 9px; left: 50%; bottom: 28px; transform: translateX(-50%); width: max-content; max-width: calc(100vw - 32px); background: #223147f5; color: #fff; border: 1px solid #ffffff20; border-radius: 12px; padding: 12px 16px; font-size: 13px; line-height: 1.6; text-align: left; box-shadow: 0 8px 28px #14233924; }
-        .toast svg { color: #79d6f6; flex-shrink: 0; }
+        button[data-desktop-action="confirm"] { border-color: #f3b8ce; background: linear-gradient(115deg, #fff0f5, #f9f2ff); color: #b33568; font-weight: 700; }
+        button[data-desktop-action="confirm"]:hover { background: linear-gradient(115deg, #ffe4ed, #f3e9fc); }
+        button:focus-visible { outline: 2px solid #aa9ad9; outline-offset: 2px; }
+        .toast { position: fixed; display: flex; align-items: center; gap: 9px; left: 50%; bottom: 24px; transform: translateX(-50%); width: max-content; max-width: calc(100vw - 32px); background: linear-gradient(115deg, #fff7fa, #f8f5fc 45%, #eefaff); color: #3f4c5d; border: 1px solid #dce4ef; border-radius: 12px; padding: 11px 14px; font-size: 13px; line-height: 1.6; text-align: left; box-shadow: 0 8px 28px #1423391a; }
+        .toast svg { color: #0084b0; flex-shrink: 0; }
         @keyframes veil-in { from { opacity: 0; } }
         @keyframes dialog-in { from { opacity: 0; transform: translateY(8px) scale(.98); } }
         @media (prefers-reduced-motion: reduce) { *, *::before { animation: none !important; transition: none !important; } }
@@ -145,8 +148,8 @@
       // Scope to the official desktop document and its existing component
       // classes. Vue owns the cards, selected state and all event handlers.
       style.textContent = `
-        html[data-bili-prophecy-desktop] { font-size: 40px !important; color-scheme: light; background: #f5f7fb; }
-        html[data-bili-prophecy-desktop] body { margin: 0; background: #f5f7fb !important; opacity: 1 !important; font: 14px system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+        html[data-bili-prophecy-desktop] { font-size: 40px !important; color-scheme: light; background: #fafbfc; }
+        html[data-bili-prophecy-desktop] body { margin: 0; background: #fafbfc !important; opacity: 1 !important; font: 14px system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
         html[data-bili-prophecy-desktop] body::-webkit-scrollbar { width: 5px; }
         html[data-bili-prophecy-desktop] body::-webkit-scrollbar-thumb { background: #ccd6e2; border-radius: 8px; }
         html[data-bili-prophecy-desktop] .user-detail-content,
@@ -157,7 +160,7 @@
         html[data-bili-prophecy-desktop] .tip { opacity: .5; right: 4px; filter: grayscale(1) brightness(.6); }
         html[data-bili-prophecy-desktop] .mb20 { margin-bottom: 16px; }
         html[data-bili-prophecy-desktop] .content-prohets-box,
-        html[data-bili-prophecy-desktop] .item-content { height: auto; min-height: 0; border: 1px solid #e5ebf3; background: #fff; padding: 16px; margin-bottom: 14px; border-radius: 16px; box-shadow: 0 4px 14px #2a496506; }
+        html[data-bili-prophecy-desktop] .item-content { height: auto; min-height: 0; border: 1px solid #e5e7eb; background: #fff; padding: 16px; margin-bottom: 14px; border-radius: 12px; box-shadow: 0 2px 8px #2a496504; }
         html[data-bili-prophecy-desktop] .content-prohets-box .title,
         html[data-bili-prophecy-desktop] .item-content .title { color: #273449; flex: 1; min-width: 0; font-size: 16px; line-height: 1.6; font-weight: 650; overflow-wrap: anywhere; }
         html[data-bili-prophecy-desktop] .text-line { min-height: 0; height: auto; padding: 0 0 14px; gap: 12px; align-items: flex-start; }
@@ -171,13 +174,13 @@
            then shrink to their text, leaving two narrow vertical buttons. */
         html[data-bili-prophecy-desktop] .content-prohets-box > .line.mt8 { display: grid; grid-template-columns: minmax(0, 1fr) 22px minmax(0, 1fr); align-items: stretch; gap: 10px; width: 100%; margin-top: 0; }
         html[data-bili-prophecy-desktop] .bigbox { flex: 1; width: auto; min-width: 0; height: auto; }
-        html[data-bili-prophecy-desktop] .box { width: 100%; height: 100%; min-height: 68px; border-radius: 12px; opacity: 1; border: 1px solid #dcecf4; background: #eef8fd !important; transition: box-shadow .15s, transform .15s; }
-        html[data-bili-prophecy-desktop] .bigbox:last-child .box { border-color: #f4dfe8; background: #fff3f8 !important; }
+        html[data-bili-prophecy-desktop] .box { width: 100%; height: 100%; min-height: 68px; border-radius: 10px; opacity: 1; border: 1px solid #cce8f5; background: linear-gradient(120deg, #edfaff, #f3f5ff) !important; transition: box-shadow .15s, transform .15s; }
+        html[data-bili-prophecy-desktop] .bigbox:last-child .box { border-color: #f1d4e0; background: linear-gradient(120deg, #fff1f6, #f9f3ff) !important; }
         html[data-bili-prophecy-desktop] .box .count-time { position: relative; max-width: 100%; color: #08769d; font-size: 16px; font-weight: 650; line-height: 1.45; text-align: center; overflow-wrap: anywhere; }
         html[data-bili-prophecy-desktop] .bigbox:last-child .box .count-time { color: #b63f70; }
         html[data-bili-prophecy-desktop] .box .sub-score { color: #5e7085; font-size: 10px; line-height: 1.5; transform: none; margin-top: 5px; }
-        html[data-bili-prophecy-desktop] .box.selected { border: 2px solid #00aeec; box-shadow: 0 0 0 3px #00aeec15; }
-        html[data-bili-prophecy-desktop] .bigbox:last-child .box.selected { border-color: #f69; box-shadow: 0 0 0 3px #ff669915; }
+        html[data-bili-prophecy-desktop] .box.selected { border: 2px solid #40b4da; box-shadow: 0 2px 8px #00aeec0c; }
+        html[data-bili-prophecy-desktop] .bigbox:last-child .box.selected { border-color: #ee85aa; box-shadow: 0 2px 8px #ff66990c; }
         html[data-bili-prophecy-desktop] .box.unselected { opacity: 1; }
         html[data-bili-prophecy-desktop] .content-prohets-box > .line:has(.box.selected) .box.unselected { opacity: .72; }
         html[data-bili-prophecy-desktop] .block { min-height: 66px; padding: 12px 26px; cursor: default; box-sizing: border-box; }
@@ -233,16 +236,25 @@
       dialog.setAttribute('aria-describedby', 'desktop-modal-content');
       const mark = doc.createElement('div');
       mark.className = 'dialog-mark';
-      mark.innerHTML = icon('spark', 28);
+      mark.innerHTML = icon('spark', 18);
       const eyebrow = doc.createElement('div');
       eyebrow.className = 'dialog-eyebrow';
       eyebrow.textContent = '直播预言 · 请确认';
       const title = doc.createElement('h2');
       title.id = 'desktop-modal-title';
       title.textContent = options.title || '直播预言';
+      const heading = doc.createElement('div');
+      heading.className = 'dialog-heading';
+      heading.append(eyebrow, title);
+      const head = doc.createElement('div');
+      head.className = 'dialog-head';
+      head.append(mark, heading);
       const content = doc.createElement('p');
       content.id = 'desktop-modal-content';
       content.textContent = options.content || '';
+      const accent = doc.createElement('div');
+      accent.className = 'dialog-accent';
+      accent.setAttribute('aria-hidden', 'true');
       const buttons = doc.createElement('div');
       buttons.className = 'buttons';
       const previousFocus = doc.activeElement;
@@ -269,7 +281,7 @@
           button.addEventListener('click', () => settle(action === 'confirm'), { once: true });
           buttons.append(button);
         }
-        dialog.append(mark, eyebrow, title, content, buttons);
+        dialog.append(head, content, accent, buttons);
         backdrop.append(dialog);
         root.append(backdrop);
         // Default focus goes to cancellation when available; never auto-confirm.
@@ -369,60 +381,57 @@
     const shadow = host.attachShadow({ mode: 'open' });
     shadow.innerHTML = `
       <style>
-        :host { all: initial; display: block; position: fixed; width: 0; height: 0; z-index: 2147483647; color-scheme: light; --ink: #263448; --muted: #8896a8; --blue: #00aeec; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+        :host { all: initial; display: block; position: fixed; width: 0; height: 0; z-index: 2147483647; color-scheme: light; --ink: #18191c; --muted: #637083; --blue: #00aeec; --wash: linear-gradient(120deg, #fcedf2, #f2eef8 48%, #e6f7fd); --accent: linear-gradient(90deg, #fb7299, #ae9cdb 48%, #00aeec); font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
         * { box-sizing: border-box; }
         [hidden] { display: none !important; }
         button, a { font: inherit; -webkit-tap-highlight-color: transparent; }
         button { cursor: pointer; transition: background .15s, box-shadow .15s, transform .15s; }
-        button:focus-visible, a:focus-visible { outline: 3px solid #00aeec70; outline-offset: 3px; }
+        button:focus-visible, a:focus-visible { outline: 2px solid #aa9ad9; outline-offset: 2px; }
         svg { flex-shrink: 0; }
-        .launcher { position: fixed; right: 24px; bottom: 142px; display: flex; align-items: center; gap: 10px; height: 52px; padding: 0 18px 0 13px; border: 1px solid #ffffff38; border-radius: 17px;
-          color: #fff; background: linear-gradient(115deg, #00afea, #258ddf); box-shadow: 0 6px 22px #008ccb38, inset 0 1px 0 #ffffff26; font-size: 15px; font-weight: 650; letter-spacing: .05em; }
-        .launcher::after { content: ""; position: absolute; top: 9px; right: 9px; width: 5px; height: 5px; background: #ffe1ef; border-radius: 50%; box-shadow: 0 0 0 3px #ffffff12; }
-        .launcher:hover { transform: translateY(-2px); box-shadow: 0 9px 26px #008ccb45; }
-        .launcher[aria-expanded="true"] { background: #fff; color: #009ed6; border-color: #d5eaf3; box-shadow: 0 4px 18px #253b5b14; }
-        .launcher[aria-expanded="true"]::after { background: #00aeec; box-shadow: 0 0 0 3px #00aeec12; }
-        .launcher-mark { display: grid; place-items: center; width: 30px; height: 30px; background: #ffffff18; border-radius: 10px; }
-        .panel { position: fixed; right: 24px; bottom: 208px; width: min(448px, calc(100vw - 32px));
-          height: min(728px, calc(100vh - 232px)); height: min(728px, calc(100dvh - 232px)); min-height: 240px;
-          display: flex; flex-direction: column; overflow: hidden; border: 1px solid #e1e8f1; border-radius: 22px;
-          background: #fff; color: var(--ink); box-shadow: 0 22px 70px #1f38552b, 0 3px 12px #1f385514; font-size: 14px; line-height: 1.5; animation: panel-in .2s ease-out; }
-        .panel::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px; background: linear-gradient(90deg, #00aeec 5%, #79c9f5 65%, #ff9cbe); }
-        header { display: flex; flex-shrink: 0; align-items: flex-start; justify-content: space-between; padding: 20px 20px 10px; background: radial-gradient(ellipse at 100% 0, #f0faff, transparent 70%); }
-        .brand { display: flex; align-items: center; gap: 12px; }
-        .brand-mark { width: 42px; height: 42px; display: grid; place-items: center; border: 1px solid #dceff8; border-radius: 14px; color: #009ed6; background: linear-gradient(140deg, #e9f9ff, #f2f6ff); }
-        .eyebrow { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; color: #63758b; font-size: 10px; font-weight: 600; letter-spacing: .1em; }
-        .live-dot { width: 5px; height: 5px; border-radius: 50%; background: #ff82ab; }
-        h2 { margin: 0; font-size: 20px; font-weight: 720; line-height: 1.3; letter-spacing: .02em; }
-        .close { display: grid; place-items: center; width: 32px; height: 32px; margin-top: -2px; border: 1px solid #e9eef5; background: #ffffffb3; color: #94a1b0; border-radius: 10px; }
-        .close:hover { color: #526479; background: #f1f5f9; }
-        .room-row { display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; gap: 8px; padding: 0 20px 12px; }
-        .room-chip { display: flex; align-items: center; gap: 6px; color: #6f8097; font-size: 11px; }
-        .room { font-variant-numeric: tabular-nums; }
-        .source { color: #5f728a; background: #f4f8fc; border: 1px solid #e9f0f6; border-radius: 6px; padding: 3px 7px; font-size: 10px; }
-        nav { display: flex; flex-shrink: 0; gap: 4px; margin: 0 18px 12px; padding: 4px; border: 1px solid #edf1f6; border-radius: 13px; background: #f3f6fa; }
-        nav button { display: flex; align-items: center; justify-content: center; gap: 8px; flex: 1; min-height: 37px; padding: 7px 10px; border: 1px solid transparent; border-radius: 10px; background: transparent; color: #5e7088; font-size: 13px; font-weight: 550; }
-        nav button:hover { color: #4f6c84; background: #ffffff70; }
-        nav button[aria-pressed="true"] { background: #fff; color: #007ba5; border-color: #e2eaf3; font-weight: 650; box-shadow: 0 2px 5px #1e395508; }
-        .viewport { flex: 1; min-height: 0; position: relative; overflow: hidden; border-top: 1px solid #edf1f6; border-bottom: 1px solid #edf1f6; background: #f5f7fb; }
+        .launcher { position: fixed; right: 24px; bottom: 142px; display: flex; align-items: center; gap: 7px; height: 42px; padding: 0 13px 0 9px; border: 1px solid transparent; border-radius: 13px;
+          color: #3f4c5d; background: linear-gradient(115deg, #fff8fa, #fbf9fe 48%, #f0fbff) padding-box, linear-gradient(115deg, #efb5cb, #c5b9e5 48%, #8ed5ea) border-box; box-shadow: 0 4px 14px #1c334518; font-size: 13px; font-weight: 650; }
+        .launcher:hover { transform: translateY(-1px); box-shadow: 0 5px 18px #1c334522; }
+        .launcher:active { transform: translateY(0); }
+        .launcher[aria-expanded="true"] { color: #007ba5; background: linear-gradient(115deg, #fff5f9, #f7f3fc 48%, #eaf9ff) padding-box, var(--accent) border-box; }
+        .launcher-mark { display: grid; place-items: center; width: 24px; height: 24px; color: #0084b0; background: linear-gradient(135deg, #fce7ef, #ece8f8 48%, #ddf4fd); border-radius: 8px; }
+        .panel { position: fixed; right: 24px; bottom: 198px; width: min(448px, calc(100vw - 32px));
+          height: min(728px, calc(100vh - 222px)); height: min(728px, calc(100dvh - 222px)); min-height: 240px;
+          display: flex; flex-direction: column; overflow: hidden; border: 1px solid #dfe3e9; border-radius: 16px;
+          background: #fff; color: var(--ink); box-shadow: 0 18px 48px #0f172e2e; font-size: 14px; line-height: 1.5; animation: panel-in .2s ease-out; }
+        header { display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; gap: 10px; padding: 16px 18px; background: var(--wash); border-bottom: 1px solid #e0e4ea; }
+        .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+        .brand-copy { min-width: 0; }
+        .brand-mark { flex-shrink: 0; width: 30px; height: 30px; display: grid; place-items: center; border: 1px solid #ffffffb3; border-radius: 10px; color: #0084b0; background: #ffffff80; }
+        h2 { margin: 0; font-size: 16px; font-weight: 750; line-height: 1.4; }
+        .close { flex-shrink: 0; display: grid; place-items: center; width: 30px; height: 30px; border: 0; background: transparent; color: #61666d; border-radius: 8px; }
+        .close:hover { color: #3f4c5d; background: #0000000d; }
+        .room-chip { display: flex; align-items: center; gap: 5px; margin-top: 3px; color: #637083; font-size: 11px; }
+        .room { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+        nav { display: flex; flex-shrink: 0; gap: 9px; margin: 14px 16px 12px; }
+        nav button { display: flex; align-items: center; justify-content: center; gap: 7px; flex: 1; min-height: 36px; padding: 7px 10px; border: 1px solid #e0e4ea; border-radius: 10px; background: #fff; color: #637083; font-size: 13px; font-weight: 600; }
+        nav button:hover { background: #fafbfc; }
+        nav button[aria-pressed="true"] { background: linear-gradient(115deg, #effaff, #f4f5ff); color: #007ba5; border-color: #b9e1f2; font-weight: 650; }
+        nav button[data-action="history"][aria-pressed="true"] { background: linear-gradient(115deg, #fff2f7, #f9f3ff); color: #b33568; border-color: #f3b8ce; }
+        .accent-line { flex-shrink: 0; height: 3px; margin: 0 16px 12px; border-radius: 8px; background: var(--accent); }
+        .viewport { flex: 1; min-height: 0; position: relative; overflow: hidden; border-top: 1px solid #eef0f3; border-bottom: 1px solid #e5e7eb; background: #fafbfc; }
         .content { height: 100%; overflow: hidden; }
-        .content iframe { width: 100%; height: 100%; display: block; border: 0; background: #f5f7fb; }
+        .content iframe { width: 100%; height: 100%; display: block; border: 0; background: #fafbfc; }
         .message { height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; padding: 28px; text-align: center; color: #8896a7; }
-        .message-mark { display: grid; place-items: center; width: 60px; height: 60px; margin-bottom: 20px; border: 1px solid #dfebf5; border-radius: 20px; color: #83b4cf; background: #edf5fb; }
+        .message-mark { display: grid; place-items: center; width: 48px; height: 48px; margin-bottom: 16px; border: 1px solid #dce4ef; border-radius: 14px; color: #0084b0; background: var(--wash); }
         .message[data-state="error"] .message-mark { color: #d49a70; background: #fcf4ec; border-color: #f4e5d7; }
         .message-title { font-size: 15px; color: #556579; margin-bottom: 9px; }
         .message p { margin: 0 0 20px; max-width: 280px; font-size: 12px; line-height: 1.9; }
-        .retry { display: flex; align-items: center; gap: 7px; border: 1px solid #00a7df; border-radius: 10px; background: #00aeec; color: #fff; padding: 9px 16px; font-size: 12px; font-weight: 600; }
-        .retry:hover { background: #009ed7; }
-        .loading-view { position: absolute; inset: 0; padding: 25px 20px; background: #f5f7fb; overflow: hidden; }
+        .retry { display: flex; align-items: center; gap: 7px; border: 1px solid #b9e1f2; border-radius: 10px; background: #fff; color: #007ba5; padding: 9px 16px; font-size: 12px; font-weight: 650; }
+        .retry:hover { background: #effaff; }
+        .loading-view { position: absolute; inset: 0; padding: 20px 16px; background: #fafbfc; overflow: hidden; }
         .loading-caption { display: flex; align-items: center; gap: 8px; margin: 0 0 18px; font-size: 12px; color: #8c9aab; }
         .spinner { width: 13px; height: 13px; border: 2px solid #dce9f4; border-top-color: #00aeec; border-radius: 50%; animation: spin 1s linear infinite; }
-        .skeleton-card { padding: 20px; margin-bottom: 14px; background: #fff; border: 1px solid #e5ebf3; border-radius: 16px; }
+        .skeleton-card { padding: 16px; margin-bottom: 14px; background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; }
         .skeleton-line { height: 12px; border-radius: 4px; background: #edf1f6; width: 75%; margin-bottom: 12px; animation: pulse 1.4s ease-in-out infinite; }
         .skeleton-line.short { width: 42%; height: 8px; margin-bottom: 20px; }
         .skeleton-options { display: flex; gap: 16px; margin-bottom: 16px; }
-        .skeleton-options span { flex: 1; height: 60px; border-radius: 10px; background: #eef7fc; }
-        .skeleton-options span + span { background: #fcf1f7; }
+        .skeleton-options span { flex: 1; height: 60px; border-radius: 10px; background: linear-gradient(120deg, #edfaff, #f3f5ff); }
+        .skeleton-options span + span { background: linear-gradient(120deg, #fff1f6, #f9f3ff); }
         .skeleton-bar { height: 9px; border-radius: 5px; background: linear-gradient(90deg, #d9effa 60%, #f7dfeb 60%); }
         footer { flex-shrink: 0; padding: 10px 16px; background: #fff; }
         .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
@@ -433,9 +442,11 @@
         .connection[data-state="loading"]::before { background: #78bce0; }
         .connection[data-state="warning"] { color: #b08b64; }
         .connection[data-state="warning"]::before { background: #d4a771; }
-        .tools { display: flex; align-items: center; gap: 3px; }
-        footer button, footer a { display: flex; align-items: center; gap: 5px; min-height: 30px; border: 0; border-radius: 7px; padding: 6px 7px; background: transparent; color: #617e98; text-decoration: none; font-size: 11px; white-space: nowrap; }
-        footer button:hover, footer a:hover { color: #009ed6; background: #f0f8fc; }
+        .tools { display: flex; align-items: center; gap: 7px; }
+        footer button, footer a { display: flex; align-items: center; gap: 5px; min-height: 30px; border: 1px solid #b9e1f2; border-radius: 9px; padding: 5px 8px; background: #fff; color: #007ba5; text-decoration: none; font-size: 11px; font-weight: 600; white-space: nowrap; }
+        footer a { border-color: #f3b8ce; color: #b33568; }
+        footer button:hover { background: #effaff; }
+        footer a:hover { background: #fff2f7; }
         footer a[aria-disabled="true"] { color: #b1bcc8; pointer-events: none; }
         .footnote { display: flex; align-items: flex-start; gap: 10px; justify-content: space-between; margin-top: 5px; }
         .hint { flex: 1; margin: 0; color: #63758b; font-size: 10px; line-height: 1.7; }
@@ -444,24 +455,23 @@
         @keyframes spin { to { transform: rotate(360deg); } }
         @keyframes pulse { 50% { opacity: .45; } }
         @media (max-width: 540px), (max-height: 640px) {
-          .launcher { right: 14px; bottom: 20px; height: 48px; }
-          .panel { right: 14px; bottom: 82px; width: min(448px, calc(100vw - 28px)); height: calc(100vh - 106px); height: calc(100dvh - 106px); min-height: 180px; border-radius: 18px; }
-          header { padding: 19px 18px 12px; }
-          .room-row { padding: 0 18px 12px; }
-          nav { margin: 0 16px 14px; }
+          .launcher { right: 14px; bottom: 20px; height: 42px; }
+          .panel { right: 14px; bottom: 76px; width: min(448px, calc(100vw - 28px)); height: calc(100vh - 100px); height: calc(100dvh - 100px); min-height: 180px; border-radius: 16px; }
+          header { padding: 14px 16px; }
+          nav { margin-top: 12px; }
           footer { padding: 11px 16px; }
         }
-        @media (max-height: 420px) { header { padding: 12px 18px 8px; } .brand-mark { width: 36px; height: 36px; } h2 { font-size: 18px; } .room-row, .footnote { display: none; } nav { margin-bottom: 10px; } }
+        @media (max-height: 420px) { header { padding: 10px 16px; } h2 { font-size: 15px; } .room-chip, .footnote { display: none; } nav { margin-top: 10px; margin-bottom: 10px; } .accent-line { margin-bottom: 10px; } }
         @media (prefers-reduced-motion: reduce) { *, *::before { animation: none !important; transition: none !important; } }
       </style>
-      <button class="launcher" data-action="toggle" aria-expanded="false" aria-controls="prophecy-panel" title="打开当前直播间的官方预言"><span class="launcher-mark">${icon('spark', 21)}</span><span>预言</span></button>
+      <button class="launcher" data-action="toggle" aria-expanded="false" aria-controls="prophecy-panel" title="打开当前直播间的官方预言"><span class="launcher-mark">${icon('spark', 17)}</span><span>预言</span></button>
       <section class="panel" id="prophecy-panel" role="dialog" aria-label="B站直播预言" hidden>
-        <header><div class="brand"><span class="brand-mark">${icon('spark', 27)}</span><div><div class="eyebrow"><span class="live-dot"></span>BILIBILI LIVE</div><h2>直播预言</h2></div></div><button class="close" data-action="close" aria-label="关闭预言面板" title="收起面板">${icon('close', 16)}</button></header>
-        <div class="room-row"><div class="room-chip">${icon('room', 14)}<span class="room"></span></div><span class="source">官方预言</span></div>
+        <header><div class="brand"><span class="brand-mark">${icon('spark', 18)}</span><div class="brand-copy"><h2>直播预言</h2><div class="room-chip">${icon('room', 12)}<span class="room"></span></div></div></div><button class="close" data-action="close" aria-label="关闭预言面板" title="收起面板">${icon('close', 16)}</button></header>
         <nav aria-label="预言页面">
           <button data-action="current" aria-pressed="true">${icon('spark', 16)}当前预言</button>
           <button data-action="history" aria-pressed="false">${icon('history', 16)}参与历史</button>
         </nav>
+        <div class="accent-line" aria-hidden="true"></div>
         <div class="viewport">
           <div class="content" aria-busy="false"></div>
           <div class="message" role="status" hidden><span class="message-mark">${icon('signal', 28)}</span><strong class="message-title">正在连接直播间</strong><p></p><button class="retry" data-action="retry" hidden>${icon('refresh', 14)}重新识别主播</button></div>

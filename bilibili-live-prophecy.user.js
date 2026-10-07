@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         B站直播预言
 // @namespace    https://space.bilibili.com/1937432404
-// @version      0.3.0
-// @description  在弹幕输入框上方添加预言按钮，独立打开当前主播的官方预言与参与历史，适配桌面交互。
+// @version      0.3.1
+// @description  在弹幕输入框上方添加简约预言图标，独立打开官方预言与参与历史，适配桌面交互。
 // @author       素晴
 // @homepageURL  https://github.com/yunnre060214-sudo/bilibili-userscripts
 // @supportURL   https://github.com/yunnre060214-sudo/bilibili-userscripts/issues
@@ -17,7 +17,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.3.0';
+  const VERSION = '0.3.1';
 
   // The official H5 can read account data on desktop, but showConfirm/showToast
   // invoke an App bridge without a WEB/PC_ROOM fallback. Adapt only the UI SDK;
@@ -86,9 +86,6 @@
       shadow.innerHTML = `<style>
         :host { all: initial; position: fixed; top: 0; left: 0; width: 0; height: 0; z-index: 2147483647; color-scheme: light; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
         * { box-sizing: border-box; }
-        .badge { position: fixed; top: 10px; left: 12px; padding: 4px 9px; border: 1px solid #e2edf3; background: #fffffff2; color: #71909e; border-radius: 20px; font-size: 10px; line-height: 1.5; pointer-events: none; box-shadow: 0 2px 8px #26455a06; }
-        .badge::before { content: ""; display: inline-block; width: 5px; height: 5px; margin: 0 5px 1px 0; border-radius: 50%; background: #a7b7c3; }
-        .badge[data-ready="true"]::before { background: #25b38b; }
         .backdrop { position: fixed; inset: 0; display: grid; place-items: center; padding: 22px; background: #14233969; backdrop-filter: blur(6px); animation: veil-in .16s ease-out; }
         .dialog { width: min(364px, 100%); max-height: calc(100dvh - 44px); overflow: auto; background: #fff; color: #18191c; border: 1px solid #dfe3e9; border-radius: 16px; padding: 0; box-shadow: 0 18px 48px #0f172e2e; font-size: 14px; line-height: 1.65; animation: dialog-in .2s ease-out; }
         .dialog-head { display: flex; align-items: flex-start; gap: 10px; padding: 16px 18px; background: linear-gradient(120deg, #fcedf2, #f2eef8 48%, #e6f7fd); border-bottom: 1px solid #e0e4ea; }
@@ -111,10 +108,7 @@
         @keyframes dialog-in { from { opacity: 0; transform: translateY(8px) scale(.98); } }
         @media (prefers-reduced-motion: reduce) { *, *::before { animation: none !important; transition: none !important; } }
         [hidden] { display: none !important; }
-      </style><span class="badge"></span><div class="toast" role="status" hidden>${icon('signal', 18)}<span></span></div>`;
-      // The room panel already shows adapter status; keep its cards clear.
-      shadow.querySelector('.badge').hidden = page.top !== page.self;
-      updateBadge();
+      </style><div class="toast" role="status" hidden>${icon('signal', 18)}<span></span></div>`;
       installOfficialTheme();
       (doc.body || doc.documentElement).append(host);
       doc.addEventListener('keydown', event => {
@@ -136,17 +130,9 @@
       return shadow;
     }
 
-    function updateBadge() {
-      if (!shadow) return;
-      shadow.querySelector('.badge').textContent = adapter.status === 'ready'
-        ? `桌面交互适配已启用 v${VERSION}` : `桌面适配 v${VERSION}：等待官方组件`;
-      shadow.querySelector('.badge').dataset.ready = String(adapter.status === 'ready');
-    }
-
     function installOfficialTheme() {
       if (doc.getElementById('bili-prophecy-theme')) return;
       doc.documentElement.dataset.biliProphecyDesktop = '';
-      doc.documentElement.toggleAttribute('data-bili-prophecy-embedded', page.top !== page.self);
       const style = doc.createElement('style');
       style.id = 'bili-prophecy-theme';
       // Scope to the official desktop document and its existing component
@@ -157,7 +143,7 @@
         html[data-bili-prophecy-desktop] body::-webkit-scrollbar { width: 5px; }
         html[data-bili-prophecy-desktop] body::-webkit-scrollbar-thumb { background: #ccd6e2; border-radius: 8px; }
         html[data-bili-prophecy-desktop] .user-detail-content,
-        html[data-bili-prophecy-desktop] .content[data-v-00192e7f] { width: 100%; padding: 42px 16px 12px; box-sizing: border-box; }
+        html[data-bili-prophecy-desktop] .content[data-v-00192e7f] { width: 100%; padding: 16px 16px 12px; box-sizing: border-box; }
         html[data-bili-prophecy-desktop] .content[data-v-7569cb0e] { padding: 0 4px 2px; align-items: flex-start; }
         html[data-bili-prophecy-desktop] .content[data-v-7569cb0e] > .title { font-size: 13px; color: #526378; font-weight: 600; }
         html[data-bili-prophecy-desktop] .sub-title { color: #63758b; font-size: 12px; margin-top: 7px; margin-left: 0; }
@@ -218,9 +204,7 @@
         html[data-bili-prophecy-desktop] .empty { margin-top: 54px; }
         html[data-bili-prophecy-desktop] .empty-content .sub { color: #8593a5; max-width: 270px; line-height: 1.8; }
         html[data-bili-prophecy-desktop] .loading p { color: #526378; }
-        @media (min-width: 560px) { html[data-bili-prophecy-desktop] .user-detail-content, html[data-bili-prophecy-desktop] .content[data-v-00192e7f] { max-width: 680px; margin: 0 auto; padding-top: 54px; } html[data-bili-prophecy-desktop] .user-game-footer { max-width: 680px; left: 50%; transform: translateX(-50%); border-radius: 16px 16px 0 0; } }
-        html[data-bili-prophecy-desktop][data-bili-prophecy-embedded] .user-detail-content,
-        html[data-bili-prophecy-desktop][data-bili-prophecy-embedded] .content[data-v-00192e7f] { padding-top: 12px; }
+        @media (min-width: 560px) { html[data-bili-prophecy-desktop] .user-detail-content, html[data-bili-prophecy-desktop] .content[data-v-00192e7f] { max-width: 680px; margin: 0 auto; padding-top: 20px; } html[data-bili-prophecy-desktop] .user-game-footer { max-width: 680px; left: 50%; transform: translateX(-50%); border-radius: 16px 16px 0 0; } }
         @media (max-width: 340px) { html[data-bili-prophecy-desktop] .content-prohets-box, html[data-bili-prophecy-desktop] .item-content { padding: 12px; } html[data-bili-prophecy-desktop] .text-line { gap: 8px; } html[data-bili-prophecy-desktop] .block { padding-left: 14px; padding-right: 14px; } }
         @media (prefers-reduced-motion: reduce) { html[data-bili-prophecy-desktop] .box { transition: none; } }
       `.replaceAll('html[data-bili-prophecy-desktop]', 'html[data-bili-prophecy-desktop]:has(.user-detail-content, .content[data-v-00192e7f])');
@@ -312,7 +296,6 @@
       sdk.showToast = showToast;
       adapter.status = 'ready';
       ensureRoot();
-      updateBadge();
     }
 
     function patchChunk(record) {
@@ -389,18 +372,18 @@
     host.id = ROOT_ID;
     const shadow = host.attachShadow({ mode: 'open' });
     shadow.innerHTML = `<style>
-      :host { all: initial; display: inline-flex; flex: 0 0 auto; align-self: center; vertical-align: middle; height: 28px; margin-left: 4px; color-scheme: light; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+      :host { all: initial; display: inline-flex; flex: 0 0 auto; align-self: center; vertical-align: middle; width: 28px; height: 28px; margin-left: 4px; color-scheme: light dark; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
       :host([data-placement="toolbar"]) { float: left; }
       * { box-sizing: border-box; }
-      button { display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; gap: 3px; width: 51px; height: 28px; padding: 0 5px; border: 1px solid transparent; border-radius: 8px; color: #3f4c5d; background: linear-gradient(115deg, #fff8fa, #fbf9fe 48%, #f0fbff) padding-box, linear-gradient(115deg, #efb5cb, #c5b9e5 48%, #8ed5ea) border-box; font: inherit; font-size: 11px; font-weight: 650; line-height: 1; letter-spacing: 0; white-space: nowrap; cursor: pointer; -webkit-tap-highlight-color: transparent; transition: background .15s, box-shadow .15s; }
-      svg { flex-shrink: 0; color: #0084b0; }
-      button:hover:not(:disabled) { background: linear-gradient(115deg, #fff2f7, #f7f2fc 48%, #eaf9ff) padding-box, linear-gradient(115deg, #fb7299, #ae9cdb 48%, #00aeec) border-box; box-shadow: 0 2px 8px #1c334518; }
-      button:active:not(:disabled) { box-shadow: inset 0 1px 3px #1c334514; }
+      button { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 3px; border: 0; border-radius: 6px; color: #858b96; background: transparent; font: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; transition: background .15s, transform .15s; }
+      svg { display: block; flex-shrink: 0; }
+      button:hover:not(:disabled) { background: linear-gradient(135deg, #fb72991a, #ae9cdb1a 48%, #00aeec1a); }
+      button:active:not(:disabled) { transform: scale(.94); }
       button:focus-visible { outline: 2px solid #aa9ad9; outline-offset: 2px; }
       button:disabled { opacity: .6; cursor: wait; }
-      button[data-state="error"] { color: #a06444; }
+      button[data-state="error"] { color: #bf7857; }
       @media (prefers-reduced-motion: reduce) { button { transition: none; } }
-    </style><button type="button" data-action="open" aria-label="在独立窗口打开直播预言">${icon('spark', 14)}<span>预言</span></button>`;
+    </style><button type="button" data-action="open" aria-label="在独立窗口打开直播预言">${icon('spark', 22)}</button>`;
     const button = shadow.querySelector('button');
     ui = { host, button, mountPoint: null };
     button.addEventListener('click', event => {

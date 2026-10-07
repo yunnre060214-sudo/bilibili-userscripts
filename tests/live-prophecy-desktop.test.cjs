@@ -65,7 +65,10 @@ function setup(t, { mobile = false, existing = false, cached = false } = {}) {
 
 test('desktop confirmation opens a real dialog and resolves only after manual confirmation', async t => {
   const app = setup(t);
+  assert.equal(app.root().querySelector('.badge'), null);
   app.load();
+  assert.equal(app.root().querySelector('.badge'), null);
+  assert.doesNotMatch(app.root().textContent, /桌面交互适配已启用|等待官方组件/);
   let resolved = false;
   const result = app.sdk.showConfirm({ title: '这把能不能自摸？', content: '我猜：不能\n猜对将获得：3（硬币）', confirmText: '确认', cancelText: '再想想' });
   result.then(() => { resolved = true; });
@@ -79,7 +82,7 @@ test('desktop confirmation opens a real dialog and resolves only after manual co
   assert.equal(app.root().querySelector('[role="dialog"]'), null);
 });
 
-test('an embedded official page hides the duplicate badge and still opens confirmation', async t => {
+test('an embedded official page has no status badge and still opens confirmation', async t => {
   const parent = new JSDOM('<!doctype html><iframe src="https://live.bilibili.com/p/html/live-app-guessing-game/index.html?anchorId=353609978#/"></iframe>', {
     url: 'https://live.bilibili.com/13233348', runScripts: 'outside-only',
   });
@@ -92,7 +95,7 @@ test('an embedded official page hides the duplicate badge and still opens confir
   installRuntime(page, sdk)(1171);
   page.eval(source);
   const root = page.document.getElementById('bili-prophecy-desktop').shadowRoot;
-  assert.equal(root.querySelector('.badge').hidden, true);
+  assert.equal(root.querySelector('.badge'), null);
   const pending = sdk.showConfirm({ title: '嵌入页确认', content: '不能' });
   assert.equal(root.querySelector('[role="dialog"] h2').textContent, '嵌入页确认');
   root.querySelector('[data-desktop-action="cancel"]').click();

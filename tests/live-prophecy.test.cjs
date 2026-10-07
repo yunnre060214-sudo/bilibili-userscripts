@@ -84,7 +84,9 @@ test('the standalone button follows the three native icons above the unchanged d
   assert.equal(left.querySelectorAll('button').length, 3);
   assert.equal(doc.querySelector('textarea').value, '未发送内容');
   assert.equal(doc.querySelector('.send-btn').textContent, '发送');
-  assert.equal(app.button().textContent, '预言');
+  assert.equal(app.button().textContent, '');
+  assert.equal(app.button().querySelectorAll('svg').length, 1);
+  assert.equal(app.button().getAttribute('aria-label'), '在独立窗口打开直播预言');
   assert.equal(app.button().type, 'button');
   assert.equal(app.requests.length, 1);
   app.button().click();

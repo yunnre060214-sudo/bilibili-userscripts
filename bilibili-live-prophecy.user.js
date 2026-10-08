@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         B站直播预言
 // @namespace    https://space.bilibili.com/1937432404
-// @version      0.3.1
+// @version      1.0.0
 // @description  在弹幕输入框上方添加简约预言图标，独立打开官方预言与参与历史，适配桌面交互。
 // @author       素晴
 // @homepageURL  https://github.com/yunnre060214-sudo/bilibili-userscripts
@@ -17,7 +17,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.3.1';
+  const VERSION = '1.0.0';
 
   // The official H5 can read account data on desktop, but showConfirm/showToast
   // invoke an App bridge without a WEB/PC_ROOM fallback. Adapt only the UI SDK;
@@ -40,6 +40,9 @@
   let poll = null;
   let observer = null;
   let active = true;
+  let themeObserver = null;
+  const owners = new Map();
+  const openedAt = new Map();
 
   function positiveId(value) {
     const text = String(value ?? '');
@@ -76,9 +79,21 @@
     let shadow = null;
     let cancelPending = null;
     let toastTimer = null;
+    let workspace = null;
+    let desktopObserver = null;
+    let observing = true;
+    let eventsBound = false;
 
     function ensureRoot() {
-      if (shadow) return shadow;
+      if (shadow?.host.isConnected) return shadow;
+      if (shadow) {
+        // Clear the detached root before settling: settlement syncs the
+        // workspace, which could otherwise recurse into this same rebuild.
+        shadow = null;
+        cancelPending?.();
+        // An official cancellation callback may have opened a new dialog.
+        if (shadow?.host.isConnected) return shadow;
+      }
       if (!doc.documentElement) return null;
       const host = doc.createElement('div');
       host.id = 'bili-prophecy-desktop';
@@ -108,9 +123,11 @@
         @keyframes dialog-in { from { opacity: 0; transform: translateY(8px) scale(.98); } }
         @media (prefers-reduced-motion: reduce) { *, *::before { animation: none !important; transition: none !important; } }
         [hidden] { display: none !important; }
-      </style><div class="toast" role="status" hidden>${icon('signal', 18)}<span></span></div>`;
+      </style><div class="toast" role="status" aria-live="polite" aria-atomic="true" hidden>${icon('signal', 18)}<span></span></div>`;
       installOfficialTheme();
       (doc.body || doc.documentElement).append(host);
+      if (!eventsBound) {
+      eventsBound = true;
       doc.addEventListener('keydown', event => {
         if (event.key === 'Tab' && cancelPending) {
           const buttons = [...shadow.querySelectorAll('.dialog button')];
@@ -126,8 +143,108 @@
           cancelPending();
         }
       });
-      page.addEventListener('pagehide', () => cancelPending?.());
+      page.addEventListener('hashchange', () => { cancelPending?.(); syncWorkspace(); });
+      page.addEventListener('pagehide', pauseDocument);
+      page.addEventListener('pageshow', observeDocument);
+      doc.addEventListener('visibilitychange', () => { if (doc.hidden) pauseDocument(); else observeDocument(); });
+      }
       return shadow;
+    }
+
+    function syncWorkspace() {
+      if (!observing) return;
+      if (shadow && !shadow.host.isConnected) { cancelPending?.(); ensureRoot(); }
+      const route = page.location.hash.slice(1) || '/';
+      const supported = route === '/' || route === '/history';
+      const content = doc.querySelector('.user-detail-content, .content[data-v-00192e7f]');
+      if (!doc.body || !supported || !content) {
+        if (workspace) workspace.host.hidden = true;
+        doc.documentElement?.removeAttribute('data-bili-prophecy-workspace');
+        return;
+      }
+      if (!workspace?.host.isConnected) {
+        const host = doc.createElement('div');
+        host.id = 'bili-prophecy-workspace';
+        const root = host.attachShadow({ mode: 'open' });
+        root.innerHTML = `<style>
+          :host { all: initial; display: block; position: sticky; top: 0; z-index: 50; color-scheme: light; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+          :host([hidden]) { display: none; }
+          * { box-sizing: border-box; }
+          .surface { position: relative; background: #fffffff2; border-bottom: 1px solid #e6e8ee; backdrop-filter: blur(16px); }
+          .surface::before { content: ""; position: absolute; inset: 0 0 auto; height: 2px; background: linear-gradient(90deg, #fb7299, #ae9cdb 48%, #00aeec); opacity: .7; }
+          .bar { display: flex; align-items: center; justify-content: space-between; gap: 20px; max-width: 960px; min-height: 68px; margin: 0 auto; padding: 14px 20px; }
+          .brand { display: flex; align-items: center; gap: 10px; color: #273449; font-size: 16px; font-weight: 700; white-space: nowrap; }
+          .mark { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 9px; color: #0084b0; background: linear-gradient(125deg, #fcedf2, #f2eef8 48%, #e6f7fd); }
+          nav { display: flex; align-items: center; gap: 6px; }
+          a, button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 34px; padding: 7px 12px; border: 1px solid transparent; border-radius: 9px; background: transparent; color: #637083; font: inherit; font-size: 12px; line-height: 18px; text-decoration: none; cursor: pointer; transition: background .15s, color .15s; }
+          a:hover, button:hover:not(:disabled) { background: #f4f6f9; color: #3f4c5d; }
+          a[aria-current="page"] { border-color: #e2dcef; background: linear-gradient(115deg, #fff5f9, #f7f4fd 48%, #effaff); color: #485677; font-weight: 650; }
+          a[aria-disabled="true"], button:disabled { opacity: .45; cursor: default; }
+          button { width: 34px; padding: 7px; flex-shrink: 0; }
+          svg { flex-shrink: 0; }
+          a:focus-visible, button:focus-visible { outline: 2px solid #aa9ad9; outline-offset: 2px; }
+          @media (max-width: 540px) { .bar { gap: 10px; min-height: 60px; padding: 12px 16px; } .brand { font-size: 14px; gap: 7px; } .mark { width: 26px; height: 26px; } nav { gap: 2px; } a { padding: 6px 8px; font-size: 11px; gap: 4px; } }
+          @media (max-width: 380px) { .brand > span:last-child { display: none; } .bar { gap: 6px; } }
+          @media (prefers-reduced-motion: reduce) { a, button { transition: none; } }
+        </style><div class="surface"><header class="bar"><div class="brand"><span class="mark">${icon('spark', 19)}</span><span>直播预言</span></div><nav aria-label="预言页面"><a data-view="current">${icon('spark', 14)}当前预言</a><a data-view="history">${icon('history', 14)}参与记录</a></nav><button type="button" data-workspace-action="refresh" aria-label="刷新当前页面" title="刷新当前页面">${icon('refresh', 16)}</button></header></div>`;
+        workspace = { host, root, current: root.querySelector('[data-view="current"]'), history: root.querySelector('[data-view="history"]'), refresh: root.querySelector('button') };
+        root.addEventListener('click', event => {
+          const link = event.target.closest?.('a[data-view]');
+          if (link && (cancelPending || link.getAttribute('aria-disabled') === 'true')) event.preventDefault();
+          if (event.target.closest?.('[data-workspace-action="refresh"]') && !cancelPending) page.location.reload();
+        });
+        doc.body.prepend(host);
+      }
+      workspace.host.hidden = false;
+      doc.documentElement.dataset.biliProphecyWorkspace = '';
+      const hasOwner = Boolean(positiveId(new URL(page.location.href).searchParams.get('anchorId')));
+      for (const [view, link] of [['current', workspace.current], ['history', workspace.history]]) {
+        const url = new URL(page.location.href);
+        url.hash = view === 'history' ? '/history' : '/';
+        const disabled = Boolean(cancelPending) || (view === 'current' && !hasOwner);
+        if (view === 'current' && !hasOwner) link.removeAttribute('href');
+        else link.href = url.href;
+        link.setAttribute('aria-disabled', String(disabled));
+        if (route === (view === 'history' ? '/history' : '/')) link.setAttribute('aria-current', 'page');
+        else link.removeAttribute('aria-current');
+      }
+      workspace.refresh.disabled = Boolean(cancelPending);
+    }
+
+    function setDialogBusy() {
+      syncWorkspace();
+    }
+
+    function lockPage() {
+      const body = doc.body;
+      const overflow = body?.style.getPropertyValue('overflow') || '';
+      const priority = body?.style.getPropertyPriority('overflow') || '';
+      const targets = [doc.getElementById('app'), workspace?.host].filter(Boolean).map(node => ({ node, inert: Boolean(node.inert) }));
+      body?.style.setProperty('overflow', 'hidden');
+      for (const { node } of targets) node.inert = true;
+      return () => {
+        if (body) { if (overflow) body.style.setProperty('overflow', overflow, priority); else body.style.removeProperty('overflow'); }
+        for (const { node, inert } of targets) node.inert = inert;
+      };
+    }
+
+    function observeDocument() {
+      observing = true;
+      if (!desktopObserver) {
+        desktopObserver = new page.MutationObserver(syncWorkspace);
+        desktopObserver.observe(doc, { childList: true, subtree: true });
+      }
+      syncWorkspace();
+    }
+
+    function pauseDocument() {
+      cancelPending?.();
+      observing = false;
+      desktopObserver?.disconnect();
+      desktopObserver = null;
+      page.clearTimeout(toastTimer);
+      const toast = shadow?.querySelector('.toast');
+      if (toast) toast.hidden = true;
     }
 
     function installOfficialTheme() {
@@ -138,8 +255,8 @@
       // Scope to the official desktop document and its existing component
       // classes. Vue owns the cards, selected state and all event handlers.
       style.textContent = `
-        html[data-bili-prophecy-desktop] { font-size: 40px !important; color-scheme: light; background: #fafbfc; }
-        html[data-bili-prophecy-desktop] body { margin: 0; background: #fafbfc !important; opacity: 1 !important; font: 14px system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+        html[data-bili-prophecy-desktop] { font-size: 40px !important; color-scheme: light; background: #f7f9fc; }
+        html[data-bili-prophecy-desktop] body { margin: 0; background: #f7f9fc !important; opacity: 1 !important; font: 14px system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
         html[data-bili-prophecy-desktop] body::-webkit-scrollbar { width: 5px; }
         html[data-bili-prophecy-desktop] body::-webkit-scrollbar-thumb { background: #ccd6e2; border-radius: 8px; }
         html[data-bili-prophecy-desktop] .user-detail-content,
@@ -150,7 +267,7 @@
         html[data-bili-prophecy-desktop] .tip { opacity: .5; right: 4px; filter: grayscale(1) brightness(.6); }
         html[data-bili-prophecy-desktop] .mb20 { margin-bottom: 16px; }
         html[data-bili-prophecy-desktop] .content-prohets-box,
-        html[data-bili-prophecy-desktop] .item-content { height: auto; min-height: 0; border: 1px solid #e5e7eb; background: #fff; padding: 16px; margin-bottom: 14px; border-radius: 12px; box-shadow: 0 2px 8px #2a496504; }
+        html[data-bili-prophecy-desktop] .item-content { height: auto; min-height: 0; border: 1px solid #e5e8ef; background: #fff; padding: 20px; margin-bottom: 16px; border-radius: 14px; box-shadow: 0 3px 12px #2a496506; }
         html[data-bili-prophecy-desktop] .content-prohets-box .title,
         html[data-bili-prophecy-desktop] .item-content .title { color: #273449; flex: 1; min-width: 0; font-size: 16px; line-height: 1.6; font-weight: 650; overflow-wrap: anywhere; }
         html[data-bili-prophecy-desktop] .text-line { min-height: 0; height: auto; padding: 0 0 14px; gap: 12px; align-items: flex-start; }
@@ -204,7 +321,15 @@
         html[data-bili-prophecy-desktop] .empty { margin-top: 54px; }
         html[data-bili-prophecy-desktop] .empty-content .sub { color: #8593a5; max-width: 270px; line-height: 1.8; }
         html[data-bili-prophecy-desktop] .loading p { color: #526378; }
-        @media (min-width: 560px) { html[data-bili-prophecy-desktop] .user-detail-content, html[data-bili-prophecy-desktop] .content[data-v-00192e7f] { max-width: 680px; margin: 0 auto; padding-top: 20px; } html[data-bili-prophecy-desktop] .user-game-footer { max-width: 680px; left: 50%; transform: translateX(-50%); border-radius: 16px 16px 0 0; } }
+        @media (min-width: 560px) { html[data-bili-prophecy-desktop] .user-detail-content, html[data-bili-prophecy-desktop] .content[data-v-00192e7f] { max-width: 960px; margin: 0 auto; padding-top: 20px; } html[data-bili-prophecy-desktop] .user-game-footer { max-width: 960px; left: 50%; transform: translateX(-50%); border-radius: 16px 16px 0 0; } }
+        @media (min-width: 1000px) {
+          html[data-bili-prophecy-desktop] .user-detail-content,
+          html[data-bili-prophecy-desktop] .content[data-v-00192e7f] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; align-items: start; }
+          html[data-bili-prophecy-desktop] .user-detail-content > :not(.content-prohets-box),
+          html[data-bili-prophecy-desktop] .content[data-v-00192e7f] > :not(.item-content) { grid-column: 1 / -1; }
+          html[data-bili-prophecy-desktop] .content-prohets-box,
+          html[data-bili-prophecy-desktop] .item-content { margin-bottom: 0; }
+        }
         @media (max-width: 340px) { html[data-bili-prophecy-desktop] .content-prohets-box, html[data-bili-prophecy-desktop] .item-content { padding: 12px; } html[data-bili-prophecy-desktop] .text-line { gap: 8px; } html[data-bili-prophecy-desktop] .block { padding-left: 14px; padding-right: 14px; } }
         @media (prefers-reduced-motion: reduce) { html[data-bili-prophecy-desktop] .box { transition: none; } }
       `.replaceAll('html[data-bili-prophecy-desktop]', 'html[data-bili-prophecy-desktop]:has(.user-detail-content, .content[data-v-00192e7f])');
@@ -245,7 +370,8 @@
       accent.setAttribute('aria-hidden', 'true');
       const buttons = doc.createElement('div');
       buttons.className = 'buttons';
-      const previousFocus = doc.activeElement;
+      const previousFocus = doc.activeElement?.shadowRoot?.activeElement || doc.activeElement;
+      const releasePage = lockPage();
       return new page.Promise(resolve => {
         let settled = false;
         const settle = confirm => {
@@ -253,7 +379,10 @@
           settled = true;
           cancelPending = null;
           backdrop.remove();
-          previousFocus?.focus?.();
+          releasePage();
+          setDialogBusy();
+          if (previousFocus?.isConnected) previousFocus.focus?.();
+          else workspace?.current.focus();
           const result = { confirm, cancel: !confirm, noRemind: false };
           try {
             if (typeof options.callback === 'function') options.callback(result);
@@ -261,6 +390,7 @@
           } finally { resolve(result); }
         };
         cancelPending = () => settle(false);
+        setDialogBusy();
         for (const action of options.showCancel === false ? ['confirm'] : ['cancel', 'confirm']) {
           const button = doc.createElement('button');
           button.type = 'button';
@@ -279,10 +409,11 @@
 
     function showToast(options = {}) {
       const toast = ensureRoot().querySelector('.toast');
-      toast.querySelector('span').textContent = options.msg || options.title || '';
+      const message = String(options.msg || options.title || '');
+      toast.querySelector('span').textContent = message;
       toast.hidden = false;
       page.clearTimeout(toastTimer);
-      toastTimer = page.setTimeout(() => { toast.hidden = true; }, 3200);
+      toastTimer = page.setTimeout(() => { toast.hidden = true; }, Math.min(8000, Math.max(3200, message.length * 60)));
       return page.Promise.resolve({});
     }
 
@@ -337,6 +468,7 @@
 
     ensureRoot();
     if (!shadow) doc.addEventListener('DOMContentLoaded', ensureRoot, { once: true });
+    observeDocument();
     probeCurrentSDK();
     return adapter;
   }
@@ -346,25 +478,69 @@
     return match ? positiveId(match[1]) : null;
   }
 
-  function officialUrl() {
+  function officialUrl(view = 'current') {
     const url = new URL(OFFICIAL);
-    url.searchParams.set('anchorId', state.anchorId);
-    url.hash = '/';
+    if (state?.anchorId) url.searchParams.set('anchorId', state.anchorId);
+    url.hash = view === 'history' ? '/history' : '/';
     return url.href;
   }
 
+  function cachedOwner(id) {
+    const item = owners.get(id);
+    if (!item) return null;
+    if (Date.now() - item.savedAt >= 300000) { owners.delete(id); return null; }
+    owners.delete(id);
+    owners.set(id, item);
+    return item.uid;
+  }
+
+  function rememberOwner(id, uid) {
+    owners.delete(id);
+    owners.set(id, { uid, savedAt: Date.now() });
+    if (owners.size > 32) owners.delete(owners.keys().next().value);
+  }
+
+  function syncEntryTheme() {
+    if (!ui?.host.isConnected) return;
+    let node = ui.mountPoint.closest('.chat-control-panel')?.querySelector('.chat-input-ctnr') || ui.mountPoint;
+    let dark = false;
+    while (node) {
+      const rgba = getComputedStyle(node).backgroundColor.match(/[\d.]+/g)?.map(Number);
+      if (rgba?.length >= 3 && (rgba.length === 3 || rgba[3] >= .5)) {
+        dark = rgba[0] * .2126 + rgba[1] * .7152 + rgba[2] * .0722 < 140;
+        break;
+      }
+      node = node.parentElement;
+    }
+    ui.host.dataset.theme = dark ? 'dark' : 'light';
+  }
+
+  function watchEntryTheme() {
+    if (!ui?.host.isConnected || document.hidden) return;
+    const input = ui.mountPoint.closest('.chat-control-panel')?.querySelector('.chat-input-ctnr') || null;
+    if (themeObserver && ui.themeInput === input) return;
+    themeObserver?.disconnect();
+    themeObserver = new MutationObserver(syncEntryTheme);
+    ui.themeInput = input;
+    const nodes = new Set([document.documentElement, document.body, input]);
+    for (let node = ui.mountPoint; node; node = node.parentElement) nodes.add(node);
+    for (const node of nodes) if (node) themeObserver.observe(node, { attributes: true, attributeFilter: ['class', 'style', 'data-theme'] });
+    syncEntryTheme();
+  }
+
   function placeRoot() {
-    if (!active || !ui || !state) return;
-    // Keep the entry inside the native controls, including when Vue replaces them.
-    // The connected fast path avoids scanning the DOM for each incoming danmaku.
-    if (ui.host.isConnected && ui.host.parentNode === ui.mountPoint) return;
+    if (!active || document.hidden || !ui || !state) return;
+    if (ui.host.isConnected && ui.host.parentNode === ui.mountPoint) { watchEntryTheme(); return; }
     const toolbar = document.querySelector('#chat-control-panel-vm .control-panel-icon-row, .chat-control-panel .control-panel-icon-row');
     if (!toolbar) return;
+    themeObserver?.disconnect();
+    themeObserver = null;
     const left = toolbar.querySelector(':scope > .icon-left-part');
     ui.mountPoint = left || toolbar;
     ui.host.dataset.placement = left ? 'left' : 'toolbar';
     if (left) left.append(ui.host);
     else toolbar.prepend(ui.host);
+    watchEntryTheme();
   }
 
   function createUI() {
@@ -372,23 +548,27 @@
     host.id = ROOT_ID;
     const shadow = host.attachShadow({ mode: 'open' });
     shadow.innerHTML = `<style>
-      :host { all: initial; display: inline-flex; flex: 0 0 auto; align-self: center; vertical-align: middle; width: 28px; height: 28px; margin-left: 4px; color-scheme: light dark; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+      :host { all: initial; display: inline-flex; flex: 0 0 auto; align-self: center; vertical-align: middle; width: 28px; height: 28px; margin-left: 4px; color-scheme: light dark; --entry-ink: #61666d; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+      :host([data-theme="dark"]) { --entry-ink: #b5bdc8; }
       :host([data-placement="toolbar"]) { float: left; }
       * { box-sizing: border-box; }
-      button { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 3px; border: 0; border-radius: 6px; color: #858b96; background: transparent; font: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; transition: background .15s, transform .15s; }
+      button { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 3px; border: 0; border-radius: 6px; color: var(--entry-ink); background: transparent; font: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; transition: background .15s, color .15s, transform .15s; }
       svg { display: block; flex-shrink: 0; }
       button:hover:not(:disabled) { background: linear-gradient(135deg, #fb72991a, #ae9cdb1a 48%, #00aeec1a); }
       button:active:not(:disabled) { transform: scale(.94); }
       button:focus-visible { outline: 2px solid #aa9ad9; outline-offset: 2px; }
       button:disabled { opacity: .6; cursor: wait; }
       button[data-state="error"] { color: #bf7857; }
+      :host([data-theme="dark"]) button[data-state="error"] { color: #e6af91; }
       @media (prefers-reduced-motion: reduce) { button { transition: none; } }
     </style><button type="button" data-action="open" aria-label="在独立窗口打开直播预言">${icon('spark', 22)}</button>`;
     const button = shadow.querySelector('button');
     ui = { host, button, mountPoint: null };
+    button.addEventListener('pointerenter', syncEntryTheme);
+    button.addEventListener('focus', syncEntryTheme);
     button.addEventListener('click', event => {
       event.stopPropagation();
-      openPrediction();
+      openPrediction(event.shiftKey ? 'history' : 'current');
     });
     renderEntry();
     placeRoot();
@@ -402,49 +582,76 @@
     ui.button.setAttribute('aria-busy', String(loading));
     ui.button.setAttribute('aria-label', state.status === 'error' ? '主播识别失败，点击重试' : '在独立窗口打开直播预言');
     ui.button.title = loading ? '正在识别当前主播…'
-      : state.status === 'error' ? `${state.error} 点击重试。`
-      : `在独立窗口打开当前主播的预言 · v${VERSION}`;
+      : state.status === 'error' ? `${state.error} 点击重试；参与记录可从油猴菜单打开。`
+      : `打开预言；Shift+点击查看参与记录 · v${VERSION}`;
   }
 
-  function openPrediction() {
-    // Recheck synchronously in case the SPA route changed before the timer ran.
+  function openPrediction(view = 'current') {
     syncRoute();
-    if (!state || state.status === 'loading') return;
-    if (state.status === 'error') {
-      lookup(state);
+    if (view !== 'history') {
+      if (!state || state.status === 'loading') return;
+      if (state.status === 'error') { lookup(state); return; }
+      if (!positiveId(state.anchorId)) return;
+    }
+    const url = officialUrl(view);
+    const now = Date.now();
+    const previous = openedAt.get(url);
+    if (previous !== undefined && now - previous < 600) return;
+    openedAt.delete(url);
+    openedAt.set(url, now);
+    if (openedAt.size > 32) openedAt.delete(openedAt.keys().next().value);
+    window.open(url, '_blank', 'noopener,noreferrer');
+  }
+
+  function stopRetry(target) {
+    clearTimeout(target?.retryTimer);
+    if (target) target.retryTimer = null;
+  }
+
+  async function lookup(target, automatic = false) {
+    if (!target || target !== state || !active) return;
+    stopRetry(target);
+    target.controller?.abort();
+    if (!automatic) target.autoRetries = 0;
+    if (navigator.onLine === false) {
+      target.status = 'error';
+      target.error = '网络已断开，联网后将重新识别主播。';
+      renderEntry();
       return;
     }
-    if (!positiveId(state.anchorId)) return;
-    // Stay inside the user gesture. Browser preferences choose a new tab/window.
-    window.open(officialUrl(), '_blank', 'noopener,noreferrer');
-  }
-
-  async function lookup(target) {
-    if (!target || target !== state) return;
-    target.controller?.abort();
     const controller = new AbortController();
     target.controller = controller;
     target.status = 'loading';
     target.error = '';
     renderEntry();
     const timeout = setTimeout(() => controller.abort(), 8000);
+    let transient = false;
     try {
       const url = new URL('https://api.live.bilibili.com/room/v1/Room/room_init');
       url.searchParams.set('id', target.roomId);
       const response = await fetch(url.href, { method: 'GET', credentials: 'omit', signal: controller.signal });
-      if (!response.ok) throw new Error('room lookup HTTP failure');
+      if (!response.ok) { transient = response.status >= 500 || response.status === 429; throw new Error('room lookup HTTP failure'); }
       const payload = await response.json();
       const uid = positiveId(payload?.data?.uid);
-      if (payload.code !== 0 || !uid) throw new Error('room lookup invalid response');
+      if (payload?.code !== 0 || !uid) throw new Error('room lookup invalid response');
       if (!active || controller.signal.aborted || state !== target || target.controller !== controller || roomId() !== target.roomId) return;
       target.anchorId = uid;
       target.status = 'ready';
+      rememberOwner(target.roomId, uid);
       renderEntry();
-    } catch {
+    } catch (error) {
       if (!active || state !== target || target.controller !== controller || roomId() !== target.roomId) return;
       target.status = 'error';
-      target.error = controller.signal.aborted ? '主播识别超时。' : '暂时无法识别主播。';
+      target.error = navigator.onLine === false ? '网络已断开，联网后将重新识别主播。'
+        : controller.signal.aborted ? '主播识别超时。' : '暂时无法识别主播。';
       renderEntry();
+      if ((transient || error?.name === 'TypeError' || controller.signal.aborted) && target.autoRetries < 1 && navigator.onLine !== false && !document.hidden) {
+        target.autoRetries++;
+        target.retryTimer = setTimeout(() => {
+          target.retryTimer = null;
+          if (active && state === target && roomId() === target.roomId && !document.hidden) lookup(target, true);
+        }, 1200);
+      }
     } finally {
       clearTimeout(timeout);
       if (target.controller === controller) target.controller = null;
@@ -453,44 +660,53 @@
 
   function syncRoute() {
     const id = roomId();
-    if (id === state?.roomId) {
-      placeRoot();
-      return;
-    }
+    if (id === state?.roomId) { placeRoot(); return; }
+    stopRetry(state);
     state?.controller?.abort();
-    state = id ? { roomId: id, anchorId: null, status: 'loading', error: '', controller: null } : null;
-    if (!state) {
-      ui?.host.remove();
-      ui = null;
-      return;
-    }
+    themeObserver?.disconnect();
+    themeObserver = null;
+    state = id ? { roomId: id, anchorId: null, status: 'loading', error: '', controller: null, retryTimer: null, autoRetries: 0 } : null;
+    if (!state) { ui?.host.remove(); ui = null; return; }
     if (!ui) createUI();
-    lookup(state);
+    const uid = cachedOwner(id);
+    if (uid) { state.anchorId = uid; state.status = 'ready'; renderEntry(); placeRoot(); }
+    else lookup(state);
+  }
+
+  function suspend() {
+    observer?.disconnect();
+    observer = null;
+    themeObserver?.disconnect();
+    themeObserver = null;
+    clearInterval(poll);
+    poll = null;
+    stopRetry(state);
   }
 
   function start() {
     active = true;
-    if (!observer) {
+    if (!document.hidden && !observer) {
       observer = new MutationObserver(placeRoot);
       observer.observe(document, { childList: true, subtree: true });
     }
     syncRoute();
     if (state && state.status !== 'ready' && (!state.controller || state.controller.signal.aborted)) lookup(state);
-    if (poll === null) poll = setInterval(syncRoute, 1000);
+    if (!document.hidden && poll === null) poll = setInterval(syncRoute, 1000);
   }
 
   window.addEventListener('popstate', syncRoute);
   window.addEventListener('pageshow', start);
-  window.addEventListener('pagehide', () => {
-    active = false;
-    observer?.disconnect();
-    observer = null;
-    clearInterval(poll);
-    poll = null;
-    state?.controller?.abort();
+  window.addEventListener('online', () => { if (active && state?.status !== 'ready') lookup(state); });
+  window.addEventListener('offline', () => {
+    stopRetry(state);
+    if (state?.status === 'loading') state.controller?.abort();
   });
+  document.addEventListener('visibilitychange', () => { if (document.hidden) suspend(); else start(); });
+  window.matchMedia?.('(prefers-color-scheme: dark)').addEventListener?.('change', syncEntryTheme);
+  window.addEventListener('pagehide', () => { active = false; suspend(); state?.controller?.abort(); });
   if (typeof GM_registerMenuCommand === 'function') {
-    GM_registerMenuCommand('打开直播预言', openPrediction);
+    GM_registerMenuCommand('打开直播预言', () => openPrediction());
+    GM_registerMenuCommand('查看预言参与记录', () => openPrediction('history'));
   }
   start();
 })();

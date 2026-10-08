@@ -19,9 +19,9 @@ const controls = `<div id="chat-control-panel-vm" class="chat-control-panel">
 
 async function flush() { await new Promise(resolve => setImmediate(resolve)); }
 
-function setup(t, { url = 'https://live.bilibili.com/13233348', response = () => roomPayload(353609978), status = 200, withControls = true, embedded = false } = {}) {
+function setup(t, { url = 'https://live.bilibili.com/13233348', response = () => roomPayload(353609978), status = 200, withControls = true, embedded = false, online = true } = {}) {
   const dom = new JSDOM(embedded ? `<iframe src="${url}"></iframe>` : `<!doctype html><html><body>${withControls ? controls : '<main>直播页</main>'}</body></html>`, {
-    url: embedded ? 'https://live.bilibili.com/13233348' : url, runScripts: 'outside-only',
+    url: embedded ? 'https://live.bilibili.com/13233348' : url, runScripts: 'outside-only', pretendToBeVisual: true,
   });
   const window = embedded ? dom.window.document.querySelector('iframe').contentWindow : dom.window;
   const errors = [];
@@ -37,6 +37,9 @@ function setup(t, { url = 'https://live.bilibili.com/13233348', response = () =>
     window.document.close();
   }
   window.AbortController = AbortController;
+  let clock = 1800000000000;
+  window.Date.now = () => clock;
+  Object.defineProperty(window.navigator, 'onLine', { configurable: true, get: () => online });
   const requests = [], opened = [], intervals = new Map(), timeouts = new Map(), menus = new Map();
   let serial = 0;
   window.setInterval = callback => { const id = ++serial; intervals.set(id, callback); return id; };
@@ -64,10 +67,13 @@ function setup(t, { url = 'https://live.bilibili.com/13233348', response = () =>
       assert.ok(button, 'missing standalone prediction button');
       return button;
     },
-    menu() { assert.equal(menus.size, 1); menus.values().next().value(); },
+    menu(label = '打开直播预言') { assert.ok(menus.has(label)); menus.get(label)(); },
     addControls() { window.document.body.insertAdjacentHTML('beforeend', controls); },
     navigate(pathname) { window.history.pushState({}, '', pathname); for (const callback of intervals.values()) callback(); },
-    timeout(delay) { for (const { callback, delay: actual } of timeouts.values()) if (actual === delay) callback(); },
+    timeout(delay) { for (const [id, timer] of [...timeouts]) if (timer.delay === delay) { timeouts.delete(id); timer.callback(); } },
+    advance(ms) { clock += ms; },
+    intervalCount: () => intervals.size,
+    setOnline(value) { online = value; window.dispatchEvent(new window.Event(value ? 'online' : 'offline')); },
   };
 }
 
@@ -327,4 +333,163 @@ test('an HTTP error leaves a retry entry and cannot open a prediction', async t 
   await flush();
   assert.equal(app.requests.length, 2);
   assert.equal(app.opened.length, 0);
+});
+
+test('Shift clicking the icon opens the official participation history', async t => {
+  const app = setup(t);
+  await flush();
+  app.button().dispatchEvent(new app.window.MouseEvent('click', { bubbles: true, shiftKey: true }));
+  assert.equal(app.opened[0][0], 'https://live.bilibili.com/p/html/live-app-guessing-game/index.html?anchorId=353609978#/history');
+});
+
+test('history remains accessible from the menu when owner lookup fails', async t => {
+  const app = setup(t, { response: () => ({ code: -400, data: null }) });
+  await flush();
+  app.menu('查看预言参与记录');
+  assert.equal(app.opened[0][0], 'https://live.bilibili.com/p/html/live-app-guessing-game/index.html#/history');
+});
+
+test('a room revisit reuses its validated owner for five minutes only', async t => {
+  const app = setup(t, { response: id => roomPayload(id === '13233348' ? 353609978 : 777) });
+  await flush();
+  app.navigate('/999');
+  await flush();
+  app.navigate('/13233348');
+  assert.equal(app.requests.length, 2);
+  assert.equal(app.button().disabled, false);
+  app.button().click();
+  assert.equal(app.opened[0][0], expectedURL);
+  app.navigate('/999');
+  app.advance(300001);
+  app.navigate('/13233348');
+  await flush();
+  assert.equal(app.requests.length, 3);
+});
+
+test('the owner cache evicts its oldest room after 32 rooms', async t => {
+  const app = setup(t);
+  await flush();
+  for (let i = 1; i <= 32; i++) { app.navigate(`/${i}`); await flush(); }
+  app.navigate('/31');
+  await flush();
+  assert.equal(app.requests.length, 33);
+  app.navigate('/13233348');
+  await flush();
+  assert.equal(app.requests.length, 34);
+});
+
+test('rapid repeated opening is limited to one window per address in 600ms', async t => {
+  const app = setup(t);
+  await flush();
+  app.button().click();
+  app.button().click();
+  app.menu();
+  assert.equal(app.opened.length, 1);
+  app.advance(601);
+  app.button().click();
+  assert.equal(app.opened.length, 2);
+});
+
+test('a transient network failure receives one automatic retry without opening a window', async t => {
+  let attempts = 0;
+  const app = setup(t, { response: () => { if (++attempts === 1) throw new TypeError('offline transport'); return roomPayload(353609978); } });
+  await flush();
+  assert.equal(app.button().disabled, false);
+  app.timeout(1200);
+  await flush();
+  assert.equal(app.requests.length, 2);
+  assert.equal(app.button().dataset.state, 'ready');
+  assert.equal(app.opened.length, 0);
+});
+
+test('automatic retry stops after a second transport failure', async t => {
+  const app = setup(t, { response: () => { throw new TypeError('broken transport'); } });
+  await flush();
+  app.timeout(1200);
+  await flush();
+  app.timeout(1200);
+  await flush();
+  assert.equal(app.requests.length, 2);
+  assert.equal(app.button().dataset.state, 'error');
+});
+
+test('an empty owner response is rejected without treating it as a transport failure', async t => {
+  const app = setup(t, { response: () => null });
+  await flush();
+  app.timeout(1200);
+  await flush();
+  assert.equal(app.requests.length, 1);
+  assert.equal(app.button().dataset.state, 'error');
+  assert.equal(app.opened.length, 0);
+});
+
+test('a scheduled retry cannot request the room after navigation away', async t => {
+  const app = setup(t, { response: () => { throw new TypeError('broken transport'); } });
+  await flush();
+  app.navigate('/');
+  app.timeout(1200);
+  await flush();
+  assert.equal(app.requests.length, 1);
+  assert.equal(app.root(), undefined);
+});
+
+test('an offline page waits for reconnect before identifying its owner', async t => {
+  const app = setup(t, { online: false });
+  await flush();
+  assert.equal(app.requests.length, 0);
+  assert.match(app.button().title, /网络|联网/);
+  app.setOnline(true);
+  await flush();
+  assert.equal(app.requests.length, 1);
+  assert.equal(app.button().dataset.state, 'ready');
+  assert.equal(app.opened.length, 0);
+});
+
+test('hidden rooms suspend route polling and resume exactly once when visible', async t => {
+  const app = setup(t);
+  await flush();
+  let hidden = true;
+  Object.defineProperty(app.window.document, 'hidden', { configurable: true, get: () => hidden });
+  app.window.document.dispatchEvent(new app.window.Event('visibilitychange'));
+  assert.equal(app.intervalCount(), 0);
+  hidden = false;
+  app.window.document.dispatchEvent(new app.window.Event('visibilitychange'));
+  app.window.document.dispatchEvent(new app.window.Event('visibilitychange'));
+  assert.equal(app.intervalCount(), 1);
+  assert.equal(app.requests.length, 1);
+});
+
+test('the icon adapts when the native input background changes from dark to light', async t => {
+  const app = setup(t);
+  await flush();
+  const input = app.window.document.querySelector('.chat-input-ctnr');
+  const host = app.window.document.getElementById('bili-prophecy-root');
+  input.style.backgroundColor = '#1c1d1f';
+  await flush();
+  assert.equal(host.dataset.theme, 'dark');
+  input.style.backgroundColor = '#ffffff';
+  await flush();
+  assert.equal(host.dataset.theme, 'light');
+  app.button().click();
+  assert.equal(app.opened.length, 1);
+});
+
+test('replacing only the native input updates the icon theme and observes the replacement', async t => {
+  const app = setup(t);
+  await flush();
+  const doc = app.window.document;
+  const host = doc.getElementById('bili-prophecy-root');
+  const input = doc.querySelector('.chat-input-ctnr');
+  input.style.backgroundColor = '#ffffff';
+  await flush();
+  assert.equal(host.dataset.theme, 'light');
+  const replacement = input.cloneNode(true);
+  replacement.style.backgroundColor = '#1c1d1f';
+  input.replaceWith(replacement);
+  await flush();
+  assert.equal(host.dataset.theme, 'dark');
+  replacement.style.backgroundColor = '#ffffff';
+  await flush();
+  assert.equal(host.dataset.theme, 'light');
+  assert.equal(doc.querySelectorAll('#bili-prophecy-root').length, 1);
 });

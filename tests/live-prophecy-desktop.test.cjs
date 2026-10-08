@@ -25,13 +25,18 @@ function installRuntime(window, sdk) {
   return require;
 }
 
-function setup(t, { mobile = false, existing = false, cached = false } = {}) {
-  const dom = new JSDOM('<!doctype html><html><body><main id="app">官方组件 fixture</main></body></html>', {
-    url: 'https://live.bilibili.com/p/html/live-app-guessing-game/index.html?anchorId=353609978#/',
-    runScripts: 'outside-only',
+function setup(t, { mobile = false, existing = false, cached = false, workspace = false, url = 'https://live.bilibili.com/p/html/live-app-guessing-game/index.html?anchorId=353609978#/' } = {}) {
+  const dom = new JSDOM(`<!doctype html><html><body><main id="app">${workspace ? '<div class="user-detail-content"><button id="return-focus">选项</button></div>' : '官方组件 fixture'}</main></body></html>`, {
+    url, runScripts: 'outside-only', pretendToBeVisual: true,
   });
-  t.after(() => dom.window.close());
   const { window } = dom;
+  const errors = [];
+  window.addEventListener('error', event => errors.push(event.message));
+  t.after(() => {
+    window.dispatchEvent(new window.Event('pagehide'));
+    dom.window.close();
+    assert.deepEqual(errors, [], 'unexpected desktop runtime error');
+  });
   window.unsafeWindow = window;
   if (mobile) Object.defineProperty(window.navigator, 'userAgent', { value: 'BiliApp iPhone', configurable: true });
   const nativeConfirm = () => new Promise(() => {});
@@ -55,6 +60,7 @@ function setup(t, { mobile = false, existing = false, cached = false } = {}) {
     window, sdk, chunk, execute, nativeConfirm,
     load() { window.webpackChunkguessing_game.push(chunk); return execute(chunk); },
     root: () => window.document.getElementById('bili-prophecy-desktop')?.shadowRoot,
+    workspace: () => window.document.getElementById('bili-prophecy-workspace')?.shadowRoot,
     button(action) {
       const button = this.root()?.querySelector(`[data-desktop-action="${action}"]`);
       assert.ok(button, `missing desktop ${action}`);
@@ -86,8 +92,14 @@ test('an embedded official page has no status badge and still opens confirmation
   const parent = new JSDOM('<!doctype html><iframe src="https://live.bilibili.com/p/html/live-app-guessing-game/index.html?anchorId=353609978#/"></iframe>', {
     url: 'https://live.bilibili.com/13233348', runScripts: 'outside-only',
   });
-  t.after(() => parent.window.close());
   const page = parent.window.document.querySelector('iframe').contentWindow;
+  const errors = [];
+  page.addEventListener('error', event => errors.push(event.message));
+  t.after(() => {
+    page.dispatchEvent(new page.Event('pagehide'));
+    parent.window.close();
+    assert.deepEqual(errors, [], 'unexpected embedded desktop runtime error');
+  });
   page.document.write('<!doctype html><html><body><main id="app">官方组件 fixture</main></body></html>');
   page.document.close();
   page.unsafeWindow = page;
@@ -216,4 +228,173 @@ test('showModal invokes the official callback with the manual choice', async t =
   app.button('cancel').click();
   await pending;
   assert.equal(callbackResult.confirm, false);
+});
+
+const flush = () => new Promise(resolve => setImmediate(resolve));
+const navigate = (page, action) => new Promise((resolve, reject) => {
+  const timeout = setTimeout(() => reject(new Error('expected official hash navigation')), 1000);
+  page.addEventListener('hashchange', () => { clearTimeout(timeout); resolve(); }, { once: true });
+  action();
+});
+
+test('workspace links use official hashes and preserve the original query', async t => {
+  const app = setup(t, { workspace: true });
+  await flush();
+  const root = app.workspace();
+  assert.ok(root, 'missing official page workspace');
+  const current = root.querySelector('[data-view="current"]');
+  const history = root.querySelector('[data-view="history"]');
+  assert.equal(current.getAttribute('aria-current'), 'page');
+  await navigate(app.window, () => history.click());
+  assert.equal(app.window.location.hash, '#/history');
+  assert.equal(app.window.location.search, '?anchorId=353609978');
+  assert.equal(history.getAttribute('aria-current'), 'page');
+  await navigate(app.window, () => current.click());
+  assert.equal(app.window.location.hash, '#/');
+});
+
+test('workspace is hidden on rules routes and restores when returning to predictions', async t => {
+  const app = setup(t, { workspace: true });
+  await flush();
+  const host = app.window.document.getElementById('bili-prophecy-workspace');
+  assert.ok(host);
+  await navigate(app.window, () => { app.window.location.hash = '/rule'; });
+  assert.equal(host.hidden, true);
+  await navigate(app.window, () => { app.window.location.hash = '/'; });
+  assert.equal(host.hidden, false);
+});
+
+test('history without an anchor disables current navigation but leaves records accessible', async t => {
+  const app = setup(t, { workspace: true, url: 'https://live.bilibili.com/p/html/live-app-guessing-game/index.html#/history' });
+  await flush();
+  const current = app.workspace()?.querySelector('[data-view="current"]');
+  assert.ok(current);
+  assert.equal(current.getAttribute('aria-disabled'), 'true');
+  current.click();
+  assert.equal(app.window.location.hash, '#/history');
+  assert.equal(app.workspace().querySelector('[data-view="history"]').getAttribute('aria-current'), 'page');
+});
+
+test('workspace waits for official content and does not duplicate after reinjection', async t => {
+  const app = setup(t);
+  assert.equal(app.workspace(), undefined);
+  app.window.document.getElementById('app').innerHTML = '<div class="user-detail-content"></div>';
+  await flush();
+  assert.ok(app.workspace());
+  app.window.eval(source);
+  await flush();
+  assert.equal(app.window.document.querySelectorAll('#bili-prophecy-workspace').length, 1);
+});
+
+test('confirmation locks scroll and content then restores the original state and focus', async t => {
+  const app = setup(t, { workspace: true });
+  app.load();
+  await flush();
+  const doc = app.window.document;
+  doc.body.style.overflow = 'scroll';
+  const content = doc.getElementById('app');
+  content.inert = false;
+  const focus = doc.getElementById('return-focus');
+  focus.focus();
+  const pending = app.sdk.showConfirm({ title: '选择', content: '需要确认' });
+  assert.equal(doc.body.style.overflow, 'hidden');
+  assert.equal(content.inert, true);
+  assert.equal(app.workspace().querySelector('[data-workspace-action="refresh"]').disabled, true);
+  app.button('cancel').click();
+  assert.equal((await pending).confirm, false);
+  assert.equal(doc.body.style.overflow, 'scroll');
+  assert.equal(content.inert, false);
+  assert.equal(doc.activeElement, focus);
+  assert.equal(app.workspace().querySelector('[data-workspace-action="refresh"]').disabled, false);
+});
+
+test('confirmation preserves content that was already inert before opening', async t => {
+  const app = setup(t, { workspace: true });
+  app.load();
+  const content = app.window.document.getElementById('app');
+  content.inert = true;
+  const pending = app.sdk.showConfirm({ title: '选择', content: '保留原状态' });
+  app.button('cancel').click();
+  await pending;
+  assert.equal(content.inert, true);
+});
+
+test('workspace cannot navigate away while a confirmation is pending', async t => {
+  const app = setup(t, { workspace: true });
+  app.load();
+  await flush();
+  const pending = app.sdk.showConfirm({ title: '选择', content: '确认之前保留页面' });
+  app.workspace().querySelector('[data-view="history"]').click();
+  await flush();
+  assert.equal(app.window.location.hash, '#/');
+  app.button('cancel').click();
+  await pending;
+  await navigate(app.window, () => app.workspace().querySelector('[data-view="history"]').click());
+  assert.equal(app.window.location.hash, '#/history');
+});
+
+test('hiding the page cancels an unconfirmed choice and restores scroll', async t => {
+  const app = setup(t, { workspace: true });
+  app.load();
+  const pending = app.sdk.showConfirm({ title: '选择', content: '页面离开时取消' });
+  Object.defineProperty(app.window.document, 'hidden', { configurable: true, value: true });
+  app.window.document.dispatchEvent(new app.window.Event('visibilitychange'));
+  const outcome = await Promise.race([pending, new Promise(resolve => setImmediate(() => resolve('still pending')))]);
+  assert.notEqual(outcome, 'still pending');
+  assert.equal(outcome.confirm, false);
+  assert.equal(app.window.document.body.style.overflow, '');
+});
+
+test('removing a dialog container cancels its choice and permits a new confirmation', async t => {
+  const app = setup(t, { workspace: true });
+  app.load();
+  const pending = app.sdk.showConfirm({ title: '选择', content: '容器重建' });
+  app.window.document.getElementById('bili-prophecy-desktop').remove();
+  await flush();
+  const outcome = await Promise.race([pending, new Promise(resolve => setImmediate(() => resolve('still pending')))]);
+  assert.notEqual(outcome, 'still pending');
+  assert.equal(outcome.confirm, false);
+  const next = app.sdk.showConfirm({ title: '再次选择', content: '仍能取消' });
+  assert.ok(app.root().querySelector('[role="dialog"]'));
+  app.button('cancel').click();
+  assert.equal((await next).confirm, false);
+});
+
+test('replacing a pending dialog cancels the old choice without leaking scroll locks', async t => {
+  const app = setup(t);
+  app.load();
+  app.window.document.body.style.overflow = 'auto';
+  const first = app.sdk.showConfirm({ title: '第一题', content: '旧选项' });
+  const second = app.sdk.showConfirm({ title: '第二题', content: '新选项' });
+  assert.equal((await first).confirm, false);
+  assert.equal(app.window.document.body.style.overflow, 'hidden');
+  app.button('cancel').click();
+  await second;
+  assert.equal(app.window.document.body.style.overflow, 'auto');
+  assert.equal(app.root().querySelectorAll('[role="dialog"]').length, 0);
+});
+
+test('a synchronous toast after root removal cancels the detached confirmation and releases the page', async t => {
+  const app = setup(t, { workspace: true });
+  app.load();
+  const doc = app.window.document;
+  doc.body.style.overflow = 'auto';
+  const content = doc.getElementById('app');
+  content.inert = false;
+  const pending = app.sdk.showConfirm({ title: '待确认', content: '容器移除后立即提示' });
+  doc.getElementById('bili-prophecy-desktop').remove();
+  app.sdk.showToast({ msg: '页面已更新' });
+  await flush();
+  const outcome = await Promise.race([pending, new Promise(resolve => setImmediate(() => resolve('still pending')))]);
+  assert.notEqual(outcome, 'still pending');
+  assert.equal(outcome.confirm, false);
+  assert.equal(doc.body.style.overflow, 'auto');
+  assert.equal(content.inert, false);
+  assert.equal(app.root().querySelector('.toast').hidden, false);
+  assert.match(app.root().querySelector('.toast').textContent, /页面已更新/);
+  const next = app.sdk.showConfirm({ title: '再次选择', content: '恢复后可以操作' });
+  app.button('cancel').click();
+  assert.equal((await next).confirm, false);
+  assert.equal(doc.body.style.overflow, 'auto');
+  assert.equal(content.inert, false);
 });

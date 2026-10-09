@@ -143,15 +143,15 @@ test('BiliForge allows a reused XHR after an earlier blocked URL', () => {
   assert.equal(xhr.sent, 1);
 });
 
-test('stable 1.0.0 release keeps all public and migration userscripts aligned', () => {
+test('stable releases keep each public and migration userscript aligned', () => {
   const primaryEcho = source('biliecho');
   const legacyEcho = source('bilibili-comment-anti-fraud-pro');
   const primaryForge = source('biliforge');
   const legacyForge = source('make-bilibili-great-again-promax');
   const exporterCode = source('bilibili-comment-thread-exporter');
 
-  for (const code of [primaryEcho, legacyEcho, primaryForge, legacyForge, exporterCode]) {
-    assert.equal(code.match(/^\/\/ @version\s+([^\s]+)$/m)?.[1], '1.0.0');
+  for (const [code, version] of [[primaryEcho, '1.0.1'], [legacyEcho, '1.0.1'], [primaryForge, '1.0.0'], [legacyForge, '1.0.0'], [exporterCode, '1.0.0']]) {
+    assert.equal(code.match(/^\/\/ @version\s+([^\s]+)$/m)?.[1], version);
   }
 
   assert.equal(legacyEcho, primaryEcho);
@@ -160,11 +160,11 @@ test('stable 1.0.0 release keeps all public and migration userscripts aligned', 
   assert.match(exporterCode, /version:\s*"1\.0\.0"/);
 });
 
-test('README declares all three stable products as 1.0.0', () => {
+test('README declares current product versions and preserves the first stable baseline', () => {
   const readme = repoFile('README.md');
 
   assert.match(readme, /BiliForge \*\*1\.0\.0\*\*/);
-  assert.match(readme, /BiliEcho \*\*1\.0\.0\*\*/);
+  assert.match(readme, /BiliEcho \*\*1\.0\.1\*\*/);
   assert.match(readme, /评论楼层导出器 \*\*1\.0\.0\*\*/);
   assert.match(readme, /1\.0\.0 是三个脚本共同的首个正式稳定基线/);
 });

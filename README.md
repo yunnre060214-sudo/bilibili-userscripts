@@ -1,6 +1,6 @@
 # Bilibili Userscripts
 
-一套面向 Bilibili 网页端的 Tampermonkey 用户脚本集合。当前包含四个独立工具：**BiliForge** 负责整体网页体验优化，**BiliEcho** 负责评论发送后的可见性检测，**B站评论楼层导出器** 负责保存完整评论楼层，**B站直播预言** 负责在直播页打开官方硬币预言与参与历史。
+一套面向 Bilibili 网页端的 Tampermonkey 用户脚本集合。当前包含五个独立工具：**BiliForge** 负责整体网页体验优化，**BiliEcho** 负责评论发送后的可见性检测，**B站评论楼层导出器** 负责保存完整评论楼层，**B站直播预言** 负责在直播页打开官方硬币预言与参与历史，**BiliFrame** 负责视频页的自适应大屏布局。
 
 ## 正式版 1.0.0
 
@@ -15,6 +15,14 @@
 ## 一键安装
 
 推荐使用桌面版 Chrome、Edge 等 Chromium 浏览器配合 Tampermonkey。安装 Tampermonkey 后，直接打开下面对应的 Raw 链接即可进入脚本安装页。
+
+### BiliFrame
+
+**用途：** 缩小视频页留白，让播放器根据窗口宽高自动调整大小，适合 MacBook 等纵向空间有限的屏幕。
+
+[安装 BiliFrame 1.0.0](https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/biliframe.user.js)
+
+默认使用沉浸布局，安装后刷新普通视频页即可。详细功能与兼容性见下面的 BiliFrame 章节。
 
 ### BiliForge
 
@@ -42,7 +50,23 @@
 
 这是预言脚本的 1.0.0 稳定版，与上面三个脚本的 1.0.0 稳定基线独立版本管理。
 
-> 新用户按需安装上面四个主文件。仓库中的 `make-bilibili-great-again-promax.user.js` 与 `bilibili-comment-anti-fraud-pro.user.js` 是旧名称迁移入口，用于让历史安装继续收到更新，不需要重复安装。
+> 新用户按需安装上面五个主文件。仓库中的 `make-bilibili-great-again-promax.user.js` 与 `bilibili-comment-anti-fraud-pro.user.js` 是旧名称迁移入口，用于让历史安装继续收到更新，不需要重复安装。
+
+## BiliFrame 1.0.0
+
+视频页顶部提供 **沉浸 / 日常 / 原版** 切换。沉浸布局把播放器置顶并占用几乎全部页面宽度，标题、操作栏、简介、评论和右侧推荐排在播放器下方；日常布局保留标题在播放器上方与右侧推荐，同时压缩边距；原版恢复 B 站布局，仅留下右下角的小型切换工具栏。
+
+- 按窗口宽度、可用高度、视频实际比例与弹幕输入栏高度计算播放器大小。默认保持画面比例，完整显示画面；窗口越宽，越可能由高度决定实际画面大小。
+- 默认收起 B 站导航，点击“导航”即可展开。设置面板可调播放器可用高度（70%–100%）、页面边距（6–32px）和推荐栏宽度（240–420px），设置自动保存。
+- **Option / Alt + L** 循环切换布局，输入弹幕、评论或使用播放器全屏时不响应快捷键。Escape 关闭设置。
+- 960px 及以下窗口自动使用单栏。浏览器全屏、原生网页全屏与原生小窗时暂停接管，退出后恢复所选模式。
+- 仅通过 CSS 网格调整现有内容位置，不移动或重新创建播放器节点，不改写网络请求或媒体地址；适配播放器重建、页面切换、窗口变化和后台恢复。
+
+**与 BewlyCat 的选择：** 仅需要边距、尺寸和排列调整，优先使用 BewlyCat 自定义 CSS，CSS 也能根据窗口宽高自适应；需要模式按钮、设置面板、保存偏好和按实际视频比例计算尺寸，再使用 BiliFrame。BewlyCat 可继续用于其他功能，播放器布局建议由一套规则负责；启用 BiliFrame 时，将视频默认显示模式设为“默认”，避免同时开启“Bewly宽屏”，停用 Wider Bilibili，并清除与播放器布局重叠的自定义 CSS。BiliFrame 默认的 `contain` 规则会覆盖 BiliForge 的画面裁切样式。
+
+当前支持 `www.bilibili.com/video/*` 的原生 `.video-container-v1` 播放页，不包含番剧、直播、首页或稍后再看页面。页面结构不匹配时保持原布局。B 站或其他扩展修改 DOM 后可能需要更新。
+
+已在当前视频页核对 DOM 层级与 46px 弹幕输入栏。29 项 Chromium 浏览器检查全部通过，采用本地页面与原生布局约束，覆盖六种窗口尺寸、模式切换、导航、设置与刷新持久化、原版恢复、输入保护、播放器重建、早期注入和特殊屏幕状态。JavaScript 语法与补丁空白检查通过；验证范围不包含用户 MacBook 上的 BewlyCat / Tampermonkey 实机联测。原有回归测试为 27/28 通过，失败项仍为 README 已记录的 BiliForge 直播画质测试，本次未修改其实现。
 
 ## BiliForge 1.0.0
 
@@ -196,6 +220,7 @@ BiliEcho 给出的是基于接口可见性和重新查询结果的**检测判断
 - BiliEcho 只关注评论发送后的检测流程。
 - 评论楼层导出器只关注原生评论菜单与楼层导出。
 - 直播预言只负责识别房间主播和打开官方组件。
+- BiliFrame 只负责普通视频页布局，不调用其他脚本的网络接口。
 
 其中 BiliForge 自己统一管理通用网络 Hook；另外两个脚本只在各自需要的接口和交互路径上工作。
 
@@ -217,7 +242,11 @@ BiliEcho 给出的是基于接口可见性和重新查询结果的**检测判断
 
 使用 `GM_registerMenuCommand` 添加油猴菜单入口，并使用 `unsafeWindow` 为官方组件的 SDK 添加桌面弹窗。房间识别通过公开 GET 接口且不携带账号凭据；预言与历史在 B 站官方独立页面加载。脚本不读取、保存或上传 Cookie，也不自行调用参与接口。
 
-四个主脚本都没有配置第三方遥测服务器，也不需要用户填写第三方 API Key。脚本的主要网络目标是 Bilibili 自身页面、媒体资源和 API；更新文件来自本 GitHub 仓库。
+### BiliFrame
+
+使用 `GM_getValue` / `GM_setValue` 保存布局偏好，使用 `GM_registerMenuCommand` 添加菜单入口。没有跨域请求或页面上下文权限；样式与按钮由浏览器本地创建。
+
+五个主脚本都没有配置第三方遥测服务器，也不需要用户填写第三方 API Key。脚本的主要网络目标是 Bilibili 自身页面、媒体资源和 API；更新文件来自本 GitHub 仓库。
 
 ## 兼容性与限制
 
@@ -226,6 +255,7 @@ BiliEcho 给出的是基于接口可见性和重新查询结果的**检测判断
 - BiliForge 与 BiliEcho 匹配 `https://*.bilibili.com/*`。
 - 评论楼层导出器匹配 `https://www.bilibili.com/video/*`。
 - 直播预言匹配 `https://live.bilibili.com/*`，在运行时分别检查直播间入口与官方预言组件路由。
+- BiliFrame 匹配 `https://www.bilibili.com/video/*`。
 - 其他用户脚本管理器可能也能运行，但没有作为正式版主要验证目标。
 - Bilibili 经常调整前端 DOM、Shadow DOM、接口结构和播放器实现，依赖页面结构的功能未来可能需要跟随更新。
 - BiliEcho 无法替代官方审核信息，只能根据实际可查询结果判断。
@@ -234,7 +264,7 @@ BiliEcho 给出的是基于接口可见性和重新查询结果的**检测判断
 
 ## 自动更新
 
-四个主脚本都在头部配置了稳定的 `@updateURL` 和 `@downloadURL`。安装后，只要 Tampermonkey 正常执行更新检查，就可以从 `main` 分支获取后续版本。
+五个主脚本都在头部配置了稳定的 `@updateURL` 和 `@downloadURL`。安装后，只要 Tampermonkey 正常执行更新检查，就可以从 `main` 分支获取后续版本。
 
 如果 Raw 页面短时间仍显示旧内容，通常属于 GitHub Raw 或浏览器缓存。可以检查仓库中文件头的 `@version` 是否已经更新，再让 Tampermonkey 重新检查更新。
 
@@ -301,6 +331,8 @@ node tests/browser-smoke.cjs
 ```
 
 如果需要指定本机 Chrome 或 Edge，可设置 `BROWSER_PATH`。
+
+BiliFrame 的布局与交互检查使用相同的 Playwright / Chromium 环境，单独运行 `npm run test:frame`。未安装 Playwright 时可使用已有的开发环境；该依赖沿用原有浏览器测试的独立安装方式，不影响脚本安装。
 
 浏览器 smoke test 使用本地拦截的测试页面和接口数据，覆盖三个主脚本共同加载、评论原生三点菜单注入、Markdown 下载、分页去重、关系图渲染、原生 JSON XHR、请求拦截以及 BiliForge 的直播前台最高、后台最低、重新恢复最高画质流程。测试不会连接真实评论发布接口，也不会替用户发布评论。
 

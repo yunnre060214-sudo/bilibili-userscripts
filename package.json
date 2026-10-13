@@ -3,7 +3,8 @@
   "private": true,
   "scripts": {
     "test": "node --test tests/*.test.cjs",
-    "test:prophecy": "node --test tests/live-prophecy.test.cjs tests/live-prophecy-desktop.test.cjs"
+    "test:prophecy": "node --test tests/live-prophecy.test.cjs tests/live-prophecy-desktop.test.cjs",
+    "test:frame": "node tests/biliframe-browser.cjs"
   },
   "devDependencies": {
     "jsdom": "26.1.0"

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BiliFrame · B站自适应大屏布局
 // @namespace    https://github.com/yunnre060214-sudo/bilibili-userscripts
-// @version      1.0.0
+// @version      1.0.1
 // @description  沉浸观看、紧凑双栏、原版布局一键切换；播放器按窗口宽高自适应，保留弹幕、评论和推荐。
 // @author       yunnre060214-sudo
 // @match        https://www.bilibili.com/video/*
@@ -41,7 +41,7 @@
     } catch { return { ...DEFAULTS }; }
   }
   let settings = readSettings();
-  let binding, host, ui, media, frame = 0, routeTimer = 0, resizeObserver, screenObserver;
+  let binding, host, ui, media, frame = 0, routeTimer = 0, resizeObserver, screenObserver, layoutObserver;
   let lastRoute = location.pathname, lastScreen = '', panelOpen = false;
   let suspended = false;
 
@@ -51,51 +51,53 @@
     html[data-biliframe-active] body { min-width: 0 !important; }
     html[data-biliframe-active] #app { min-width: 0 !important; width: 100% !important; max-width: none !important; }
     html[data-biliframe-active][data-biliframe-nav="hidden"] #biliMainHeader { display: none !important; }
-    html[data-biliframe-active] [data-biliframe-root] {
+    html[data-biliframe-active] #app :is(#mirror-vdcon, .video-container-v1)[data-biliframe-root] {
       box-sizing: border-box !important; display: grid !important; position: relative !important;
       grid-template-columns: minmax(0, 1fr) var(--bfr-sidebar) !important;
       column-gap: 20px !important; row-gap: 0 !important; align-items: start !important;
       width: calc(100% - var(--bfr-margin) * 2) !important; min-width: 0 !important;
       max-width: none !important; margin: var(--bfr-margin) auto 24px !important; padding: 0 !important;
     }
-    html[data-biliframe-active] [data-biliframe-left] {
+    html[data-biliframe-active] #app :is(#mirror-vdcon, .video-container-v1)[data-biliframe-root][data-biliframe-no-sidebar] { grid-template-columns: minmax(0, 1fr) !important; }
+    html[data-biliframe-active] #app [data-biliframe-left] {
       min-width: 0 !important; width: auto !important; max-width: none !important;
       position: static !important; margin: 0 !important; padding: 0 !important; top: auto !important;
     }
-    html[data-biliframe-active] [data-biliframe-right] {
+    html[data-biliframe-active] #app [data-biliframe-right] {
       display: block !important; min-width: 0 !important; width: auto !important;
       position: static !important; margin: 0 !important; padding: 0 !important;
     }
-    html[data-biliframe-active] [data-biliframe-right] .right-container-inner {
+    html[data-biliframe-active] #app [data-biliframe-right] .right-container-inner {
       position: static !important; top: auto !important; width: 100% !important;
     }
-    html[data-biliframe-active] [data-biliframe-left] > .video-info-container {
+    html[data-biliframe-active] #app [data-biliframe-left] > .video-info-container {
       box-sizing: border-box !important; min-width: 0 !important; width: 100% !important;
       height: auto !important; margin: 0 0 12px !important; padding: 0 !important;
     }
     html[data-biliframe-active] .video-info-container .video-title {
       font-size: 18px !important; line-height: 1.5 !important; margin: 0 !important;
     }
-    html[data-biliframe-active][data-biliframe-mode="cinema"] [data-biliframe-left] { display: contents !important; }
-    html[data-biliframe-active][data-biliframe-mode="cinema"] [data-biliframe-left] > * {
+    html[data-biliframe-active][data-biliframe-mode="cinema"] #app [data-biliframe-left] { display: contents !important; }
+    html[data-biliframe-active][data-biliframe-mode="cinema"] #app [data-biliframe-left] > * {
       grid-column: 1; min-width: 0 !important; max-width: 100% !important;
     }
-    html[data-biliframe-active][data-biliframe-mode="cinema"] [data-biliframe-left] > .video-info-container {
+    html[data-biliframe-active][data-biliframe-mode="cinema"] #app [data-biliframe-left] > .video-info-container {
       grid-row: 2; margin-top: 14px !important;
     }
-    html[data-biliframe-active][data-biliframe-mode="cinema"] [data-biliframe-left] > .video-toolbar-container { grid-row: 3; }
-    html[data-biliframe-active][data-biliframe-mode="cinema"] [data-biliframe-right] {
+    html[data-biliframe-active][data-biliframe-mode="cinema"] #app [data-biliframe-left] > .video-toolbar-container { grid-row: 3; }
+    html[data-biliframe-active][data-biliframe-mode="cinema"] #app [data-biliframe-right] {
       grid-column: 2; grid-row: 2 / span 5; margin-top: 14px !important;
     }
-    html[data-biliframe-active][data-biliframe-mode="daily"] [data-biliframe-left] { display: block !important; grid-column: 1; }
-    html[data-biliframe-active][data-biliframe-mode="daily"] [data-biliframe-right] { grid-column: 2; }
-    html[data-biliframe-active] [data-biliframe-root] #playerWrap {
+    html[data-biliframe-active][data-biliframe-mode="daily"] #app [data-biliframe-left] { display: block !important; grid-column: 1; }
+    html[data-biliframe-active][data-biliframe-mode="daily"] #app [data-biliframe-right] { grid-column: 2; }
+    html[data-biliframe-active] #app [data-biliframe-player-slot] { min-width: 0 !important; padding: 0 !important; margin: 0 !important; }
+    html[data-biliframe-active] #app :is(#mirror-vdcon, .video-container-v1)[data-biliframe-root] #playerWrap {
       box-sizing: border-box !important; position: relative !important; top: auto !important;
       left: auto !important; right: auto !important; width: 100% !important; min-width: 0 !important;
       max-width: none !important; height: var(--bfr-player-height) !important;
       min-height: 0 !important; padding: 0 !important; margin: 0 !important;
     }
-    html[data-biliframe-active][data-biliframe-mode="cinema"] [data-biliframe-root] #playerWrap { grid-column: 1 / -1; grid-row: 1; }
+    html[data-biliframe-active][data-biliframe-mode="cinema"] #app [data-biliframe-player-slot] { grid-column: 1 / -1; grid-row: 1; }
     html[data-biliframe-active] #bilibili-player-placeholder { display: none !important; }
     html[data-biliframe-active] #playerWrap #bilibili-player,
     html[data-biliframe-active] #playerWrap .bpx-docker,
@@ -122,9 +124,9 @@
     html[data-biliframe-mode="original"] #biliframe-toolbar { position: fixed; top: auto; bottom: 12px; right: 12px; width: auto; }
     #biliframe-toolbar[hidden], html[data-biliframe-special] #biliframe-toolbar { display: none !important; }
     @media (max-width: 960px) {
-      html[data-biliframe-active] [data-biliframe-root] { grid-template-columns: minmax(0, 1fr) !important; }
-      html[data-biliframe-active] [data-biliframe-right] { grid-column: 1 !important; grid-row: auto !important; }
-      html[data-biliframe-active][data-biliframe-mode="cinema"] [data-biliframe-right] { grid-row: 20 !important; }
+      html[data-biliframe-active] #app :is(#mirror-vdcon, .video-container-v1)[data-biliframe-root] { grid-template-columns: minmax(0, 1fr) !important; }
+      html[data-biliframe-active] #app [data-biliframe-right] { grid-column: 1 !important; grid-row: auto !important; }
+      html[data-biliframe-active][data-biliframe-mode="cinema"] #app [data-biliframe-right] { grid-row: 20 !important; }
     }
   `;
   html.appendChild(style);
@@ -181,7 +183,7 @@
         @media (max-width: 620px) { .hint { display: none; } .bar { gap: 4px; padding: 0 6px; } button { padding: 4px 6px; } }
       </style>
       <div class="bar" role="region" aria-label="BiliFrame 视频布局">
-        <span class="brand">BiliFrame</span><span class="hint">随窗口自适应</span><span class="spacer"></span>
+        <span class="brand" title="BiliFrame v1.0.1">BiliFrame</span><span class="hint">随窗口自适应</span><span class="spacer"></span>
         <div class="modes" role="group" aria-label="观看布局">
           <button type="button" data-mode="cinema" title="播放器置顶，信息和推荐在下方">沉浸</button>
           <button type="button" data-mode="daily" title="紧凑双栏，保留右侧推荐">日常</button>
@@ -233,33 +235,56 @@
     return Boolean(document.fullscreenElement || ['web', 'full', 'fullscreen', 'mini'].includes(screen));
   }
   function detach() {
-    resizeObserver?.disconnect(); screenObserver?.disconnect();
+    resizeObserver?.disconnect(); screenObserver?.disconnect(); layoutObserver?.disconnect();
     if (media) { media.removeEventListener('loadedmetadata', schedule); media.removeEventListener('emptied', schedule); }
     media = null;
     if (binding) {
-      for (const [node, attr] of [[binding.root, 'root'], [binding.left, 'left'], [binding.right, 'right']]) {
+      for (const [node, attr] of markerNodes()) {
         node?.removeAttribute(`data-biliframe-${attr}`);
       }
+      binding.root.removeAttribute('data-biliframe-no-sidebar');
       for (const name of ['margin', 'sidebar', 'video-height', 'player-height']) binding.root.style.removeProperty(`--bfr-${name}`);
     }
     binding = null;
     html.removeAttribute('data-biliframe-active'); html.removeAttribute('data-biliframe-special');
     if (host) host.hidden = true;
   }
+  function markerNodes() {
+    return binding ? [[binding.root, 'root'], [binding.left, 'left'], [binding.right, 'right'], [binding.slot, 'player-slot']] : [];
+  }
+  function restoreMarkers() {
+    for (const [node, name] of markerNodes()) if (node && !node.hasAttribute(`data-biliframe-${name}`)) node.setAttribute(`data-biliframe-${name}`, '');
+    binding.root.toggleAttribute('data-biliframe-no-sidebar', !binding.right);
+  }
+  function ensureStyle() {
+    if (!style.isConnected) html.appendChild(style);
+    if (style.disabled) style.disabled = false;
+  }
+  function layoutIntact() {
+    if (!binding?.root.isConnected || !binding.container.isConnected || !host?.isConnected || !style.isConnected || style.disabled) return false;
+    if (markerNodes().some(([node, name]) => node && (!node.isConnected || !node.hasAttribute(`data-biliframe-${name}`)))) return false;
+    if (binding.root.hasAttribute('data-biliframe-no-sidebar') !== !binding.right) return false;
+    const special = specialScreen();
+    const active = settings.mode !== 'original' && !special;
+    if (html.hasAttribute('data-biliframe-active') !== active || html.hasAttribute('data-biliframe-special') !== special) return false;
+    if (html.getAttribute('data-biliframe-mode') !== settings.mode || html.getAttribute('data-biliframe-nav') !== (settings.compactNav ? 'hidden' : 'visible')) return false;
+    return !active || [...binding.variables].every(([name, value]) => binding.root.style.getPropertyValue(name) === value);
+  }
   function discover() {
     const wrap = document.querySelector('#playerWrap');
     const root = wrap?.closest('.video-container-v1');
-    const left = wrap?.parentElement;
+    const left = wrap?.closest('.left-container');
     const container = wrap?.querySelector('.bpx-player-container');
-    if (!root || !container || !left?.matches('.left-container') || left.parentElement !== root) return false;
+    if (!root || !container || !left || left.parentElement !== root) return false;
     const right = [...root.children].find(node => node.matches('.right-container'));
-    if (!right) return false;
+    let slot = wrap;
+    while (slot.parentElement !== left) slot = slot.parentElement;
     const title = left.querySelector('.video-info-container');
     const header = document.getElementById('biliMainHeader');
-    if (binding?.wrap === wrap && binding.container === container && binding.root === root && binding.left === left && binding.right === right && binding.title === title && binding.header === header) return true;
+    if (binding?.wrap === wrap && binding.container === container && binding.root === root && binding.left === left && binding.right === right && binding.slot === slot && binding.title === title && binding.header === header) { restoreMarkers(); return true; }
     detach();
-    binding = { root, left, right, wrap, container, title, header };
-    root.setAttribute('data-biliframe-root', ''); left.setAttribute('data-biliframe-left', ''); right.setAttribute('data-biliframe-right', '');
+    binding = { root, left, right, wrap, container, title, header, slot, variables: new Map() };
+    restoreMarkers();
     createToolbar();
     root.parentElement.insertBefore(host, root);
     resizeObserver = new ResizeObserver(schedule);
@@ -270,14 +295,18 @@
       if (next !== lastScreen) { lastScreen = next; sync(); }
     });
     screenObserver.observe(container, { attributes: true, attributeFilter: ['data-screen'] });
+    layoutObserver = new MutationObserver(() => { if (!layoutIntact()) schedule(); });
+    for (const node of [html, root, left, right, slot]) if (node) layoutObserver.observe(node, { attributes: true, attributeFilter: ['data-biliframe-active', 'data-biliframe-special', 'data-biliframe-mode', 'data-biliframe-nav', 'data-biliframe-root', 'data-biliframe-left', 'data-biliframe-right', 'data-biliframe-player-slot', 'data-biliframe-no-sidebar', 'style'] });
     return true;
   }
   function variable(name, value) {
     const property = `--bfr-${name}`;
+    binding.variables.set(property, value);
     if (binding.root.style.getPropertyValue(property) !== value) binding.root.style.setProperty(property, value);
   }
   function sync() {
     if (suspended || document.hidden) return;
+    ensureStyle();
     if (!/^\/video\//.test(location.pathname) || !discover()) { detach(); return; }
     if (!host.isConnected || host.parentElement !== binding.root.parentElement) binding.root.parentElement.insertBefore(host, binding.root);
     const special = specialScreen();
@@ -313,7 +342,7 @@
 
   const treeObserver = new MutationObserver(records => {
     if (suspended || document.hidden) return;
-    if (!binding || !binding.root.isConnected || !binding.container.isConnected || !host?.isConnected || !binding.right.isConnected) { schedule(); return; }
+    if (!binding || !binding.root.isConnected || !binding.container.isConnected || !host?.isConnected || !style.isConnected || (binding.right && !binding.right.isConnected)) { schedule(); return; }
     // Danmaku and comments change constantly. Only structural player/page changes need discovery.
     for (const record of records) {
       if ([binding.left, binding.wrap, binding.root].includes(record.target)) { schedule(); return; }
@@ -324,10 +353,12 @@
   });
   function startObserving() {
     if (!document.body) return;
+    treeObserver.observe(html, { childList: true });
     treeObserver.observe(document.body, { childList: true, subtree: true });
     clearInterval(routeTimer);
     routeTimer = setInterval(() => {
       if (lastRoute !== location.pathname) { lastRoute = location.pathname; sync(); }
+      else if (/^\/video\//.test(location.pathname) && (!binding || !layoutIntact())) schedule();
     }, 1000);
     schedule();
   }

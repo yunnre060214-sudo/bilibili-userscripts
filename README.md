@@ -20,7 +20,7 @@
 
 **用途：** 缩小视频页留白，让播放器根据窗口宽高自动调整大小，适合 MacBook 等纵向空间有限的屏幕。
 
-[安装 BiliFrame 1.0.0](https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/biliframe.user.js)
+[安装 BiliFrame 1.0.1](https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/biliframe.user.js)
 
 默认使用沉浸布局，安装后刷新普通视频页即可。详细功能与兼容性见下面的 BiliFrame 章节。
 
@@ -52,7 +52,9 @@
 
 > 新用户按需安装上面五个主文件。仓库中的 `make-bilibili-great-again-promax.user.js` 与 `bilibili-comment-anti-fraud-pro.user.js` 是旧名称迁移入口，用于让历史安装继续收到更新，不需要重复安装。
 
-## BiliFrame 1.0.0
+## BiliFrame 1.0.1
+
+**1.0.1 修复加载后恢复默认布局的问题：** 原节点的布局标记或尺寸变量被重写后自动补回，脚本样式被移除或禁用后恢复；识别播放器新增加的外层容器，推荐栏尚未加载时继续显示大屏布局，并提高相对于原生布局规则的样式优先级。仅观察有限节点上的布局属性，弹幕变化不会触发全页属性扫描。更新后刷新整个视频页。
 
 视频页顶部提供 **沉浸 / 日常 / 原版** 切换。沉浸布局把播放器置顶并占用几乎全部页面宽度，标题、操作栏、简介、评论和右侧推荐排在播放器下方；日常布局保留标题在播放器上方与右侧推荐，同时压缩边距；原版恢复 B 站布局，仅留下右下角的小型切换工具栏。
 
@@ -66,7 +68,7 @@
 
 当前支持 `www.bilibili.com/video/*` 的原生 `.video-container-v1` 播放页，不包含番剧、直播、首页或稍后再看页面。页面结构不匹配时保持原布局。B 站或其他扩展修改 DOM 后可能需要更新。
 
-已在当前视频页核对 DOM 层级与 46px 弹幕输入栏。29 项 Chromium 浏览器检查全部通过，采用本地页面与原生布局约束，覆盖六种窗口尺寸、模式切换、导航、设置与刷新持久化、原版恢复、输入保护、播放器重建、早期注入和特殊屏幕状态。JavaScript 语法与补丁空白检查通过；验证范围不包含用户 MacBook 上的 BewlyCat / Tampermonkey 实机联测。原有回归测试为 27/28 通过，失败项仍为 README 已记录的 BiliForge 直播画质测试，本次未修改其实现。
+已在当前视频页核对 DOM 层级与 46px 弹幕输入栏。36 项 Chromium 浏览器检查全部通过，采用本地页面与原生布局约束，覆盖六种窗口尺寸、模式切换、导航、设置与刷新持久化、原版恢复、输入保护、播放器重建、早期注入和特殊屏幕状态，并新增加载后布局属性被重写、样式移除或禁用、播放器增加外层容器、推荐栏延迟加载和原生高优先级 CSS 晚加载的回归检查。JavaScript 语法与补丁空白检查通过；验证范围不包含用户 MacBook 上的 BewlyCat / Tampermonkey 实机联测。原有回归测试为 27/28 通过，失败项仍为 README 已记录的 BiliForge 直播画质测试，本次未修改其实现。
 
 ## BiliForge 1.0.0
 

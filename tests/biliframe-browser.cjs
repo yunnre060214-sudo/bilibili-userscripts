@@ -77,6 +77,33 @@ const fixture = `<!doctype html><html><head><meta charset="utf-8"><style>
       passed++;
     }
     await page.setViewportSize({width:1536,height:745});
+    // Later hydration can overwrite attributes on existing nodes without replacing them.
+    await page.evaluate(()=>{for(const e of document.querySelectorAll('[data-biliframe-root],[data-biliframe-left],[data-biliframe-right]')) for(const a of [...e.attributes]) if(a.name.startsWith('data-biliframe-')) e.removeAttribute(a.name);});
+    await page.evaluate(() => new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r))));
+    assert(await page.locator('[data-biliframe-root]').count(), 'Hydration must not permanently drop layout markers');passed++;
+    await page.evaluate(()=>{document.documentElement.removeAttribute('data-biliframe-active');document.querySelector('.video-container-v1').removeAttribute('style');});
+    await page.evaluate(() => new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r))));
+    assert((await geometry()).active && (await geometry()).player.w >= 1471,'Late attribute/style rewrites must recover');passed++;
+    await page.evaluate(()=>document.getElementById('biliframe-style').remove());
+    await page.evaluate(() => new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r))));
+    assert(await page.locator('#biliframe-style').count());assert((await geometry()).player.w >= 1471,'Removed stylesheet must be reattached');passed++;
+    await page.evaluate(()=>document.getElementById('biliframe-style').disabled=true);
+    await page.waitForFunction(()=>!document.getElementById('biliframe-style').disabled,{},{timeout:2500});
+    assert((await geometry()).player.w >= 1471,'Disabled stylesheet must recover');passed++;
+    await page.evaluate(()=>{const w=document.querySelector('#playerWrap'),slot=document.createElement('div');slot.id='late-player-shell';w.replaceWith(slot);slot.appendChild(w);});
+    await page.evaluate(() => new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r))));
+    let late=await geometry();assert(late.active && late.player.y < late.title.y && late.player.w>=1471,'A new player ancestor must keep the cinema grid');passed++;
+    await page.evaluate(()=>{const slot=document.getElementById('late-player-shell');slot.replaceWith(document.querySelector('#playerWrap'));});
+    await page.evaluate(()=>{window.savedAside=document.querySelector('.right-container');window.savedAside.remove();});
+    await page.evaluate(() => new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r))));
+    assert(await page.locator('html[data-biliframe-active]').count(),'Loading or absent recommendations must not disable the player layout');
+    assert.equal(await page.locator('[data-biliframe-root]').evaluate(r=>getComputedStyle(r).gridTemplateColumns.split(' ').length),1);
+    await page.evaluate(()=>document.querySelector('.video-container-v1').appendChild(window.savedAside));
+    await page.evaluate(() => new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r))));
+    assert(await page.locator('[data-biliframe-right]').count());passed++;
+    await page.addStyleTag({content:'#app #mirror-vdcon {width:1100px!important;display:flex!important;} #app .left-container {width:730px!important;position:sticky!important;}'});
+    late=await geometry();assert(late.active && late.player.w>=1471,'Later native layout CSS must not override the selected layout');
+    await page.evaluate(()=>{for(const s of document.querySelectorAll('style')) if(s.textContent.startsWith('#app #mirror-vdcon'))s.remove();});passed++;
     await clickMode('daily');
     let g=await geometry();
     assert(g.title.y < g.player.y && g.right.x >= g.player.x+g.player.w, 'Daily: title above player, recommendation alongside');

@@ -14,6 +14,8 @@ const assert = require('node:assert/strict');
     const page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
+    let subtitleScenario = 'available';
+    const subtitleCids = [];
 
     const reply = (id, parent = '1') => ({
       rpid: Number(id),
@@ -57,7 +59,26 @@ const assert = require('node:assert/strict');
       let payload = { code: 0, data: { replies: [reply('1')] } };
 
       if (url.pathname.includes('/view')) {
-        payload = { code: 0, data: { aid: 123 } };
+        payload = { code: 0, data: {
+          aid: 123, bvid: 'BV1234567890', cid: 100,
+          pages: [{ page: 1, cid: 100, part: '第一集' }, { page: 2, cid: 200, part: '第二集' }],
+        } };
+      }
+
+      if (url.pathname.startsWith('/x/player/')) {
+        subtitleCids.push(url.searchParams.get('cid'));
+        payload = { code: 0, data: { subtitle: { subtitles: subtitleScenario === 'available' ? [
+          { lan: 'en', lan_doc: 'English', subtitle_url: '//i0.hdslb.com/bfs/subtitle/en.json' },
+          { lan: 'zh-CN', lan_doc: '中文', subtitle_url: '//i0.hdslb.com/bfs/subtitle/zh.json' },
+        ] : [] } } };
+      }
+
+      if (url.hostname === 'i0.hdslb.com') {
+        assert.equal(url.pathname, '/bfs/subtitle/zh.json');
+        payload = { body: [
+          { from: 0, to: 2, content: '第二集的字幕正文第一句。' },
+          { from: 2, to: 4, content: '第二集的字幕正文第二句。' },
+        ] };
       }
 
       if (url.pathname.endsWith('/reply/reply')) {
@@ -87,7 +108,7 @@ const assert = require('node:assert/strict');
       });
     });
 
-    await page.goto('https://www.bilibili.com/video/BV1234567890');
+    await page.goto('https://www.bilibili.com/video/BV1234567890?p=2');
 
     await page.evaluate(() => {
       document.querySelectorAll('.quality-item').forEach(el => el.addEventListener('click', () => {
@@ -163,7 +184,21 @@ const assert = require('node:assert/strict');
     assert.match(downloadedMarkdown, /点赞 67/);
     assert.match(downloadedMarkdown, /IP属地：重庆/);
     assert.match(downloadedMarkdown, /回复 \[0002\]\(#msg-0002\) 测试用户2/);
+    assert.match(downloadedMarkdown, /当前分 P：P2 · 第二集 · CID 200/);
+    assert.match(downloadedMarkdown, /第二集的字幕正文第一句。/);
+    assert.match(downloadedMarkdown, /第二集的字幕正文第二句。/);
+    assert.ok(downloadedMarkdown.indexOf('## 视频字幕正文') < downloadedMarkdown.indexOf('## 根评论'));
     assert.doesNotMatch(downloadedMarkdown, /schema v/i);
+
+    subtitleScenario = 'unavailable';
+    const noSubtitleDownload = page.waitForEvent('download');
+    await page.locator('bili-comment-menu .bce-menu-export-item').click();
+    const withoutSubtitles = fs.readFileSync(await (await noSubtitleDownload).path(), 'utf8');
+    assert.match(withoutSubtitles, /未返回可下载的字幕/);
+    assert.match(withoutSubtitles, /这是一条测试根评论/);
+    assert.match(withoutSubtitles, /测试回复 5/);
+    assert.doesNotMatch(withoutSubtitles, /第二集的字幕正文第一句。/);
+    assert.ok(subtitleCids.length >= 3 && subtitleCids.every(cid => cid === '200'));
 
     assert.equal(
       await page.evaluate(async () => (await fetch('https://data.bilibili.com/test')).status),
@@ -204,7 +239,7 @@ const assert = require('node:assert/strict');
     });
 
     assert.deepEqual(errors, []);
-    console.log('PASS: three userscripts plus integrated BiliForge live controller; Markdown export, linked reply graph, native XHR, tracker response and high/low/high switching; no page errors.');
+    console.log('PASS: three userscripts; P2 subtitle Markdown download and no-subtitle fallback; linked reply graph, native XHR, tracker response and high/low/high live switching; no page errors.');
   } finally {
     await browser.close();
   }

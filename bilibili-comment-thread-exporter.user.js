@@ -2,14 +2,16 @@
 // @name         Bilibili Comment Thread Exporter
 // @name:zh-CN   B站评论楼层导出器
 // @namespace    https://space.bilibili.com/1937432404
-// @version      1.0.0
+// @version      1.1.0
 // @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/bilibili-comment-thread-exporter.user.js
 // @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/bilibili-comment-thread-exporter.user.js
-// @description  Download a complete Bilibili comment thread as Markdown from the native three-dot menu.
-// @description:zh-CN 在 B 站评论三点菜单中下载高密度楼层 Markdown，保留精确回复关系并减少浅层重复信息。
+// @description  Download video subtitles and a complete Bilibili comment thread together as Markdown from the native three-dot menu.
+// @description:zh-CN 在 B 站评论三点菜单中下载 Markdown，在楼层上方附上当前分 P 的字幕正文，并保留精确回复关系。
 // @author       素晴
 // @match        https://www.bilibili.com/video/*
 // @connect      api.bilibili.com
+// @connect      *.bilibili.com
+// @connect      *.hdslb.com
 // @grant        GM_xmlhttpRequest
 // @run-at       document-start
 // @noframes
@@ -24,7 +26,7 @@
 
   const META = Object.freeze({
     id: "bce-thread-exporter",
-    version: "1.0.0",
+    version: "1.1.0",
     installGuard: "__bceCommentExporterV1Installed",
   });
 
@@ -36,6 +38,8 @@
     requestRetries: 3,
     retryBaseDelayMs: 350,
     requestTimeoutMs: 30000,
+    subtitleRequestTimeoutMs: 8000,
+    subtitleTrackLimit: 3,
     menuContextTtlMs: 8000,
     menuInjectionDelaysMs: Object.freeze([0, 25, 75, 150, 300, 600, 1000]),
     parentExcerptLength: 60,
@@ -47,6 +51,11 @@
 
   const API = Object.freeze({
     replyThread: "https://api.bilibili.com/x/v2/reply/reply",
+    videoView: "https://api.bilibili.com/x/web-interface/view",
+    players: Object.freeze([
+      "https://api.bilibili.com/x/player/wbi/v2",
+      "https://api.bilibili.com/x/player/v2",
+    ]),
   });
 
   const DOM = Object.freeze({
@@ -66,7 +75,7 @@
     Object.freeze({
       id: "download-md",
       label: "导出为 MD",
-      title: "下载本楼 Markdown 文件",
+      title: "下载视频字幕与本楼 Markdown 文件",
       successText: "已导出 Markdown",
     }),
   ]);
@@ -140,6 +149,7 @@
 
     const context = {
       ...baseContext,
+      source: captureVideoSource(baseContext),
       actionRenderer,
       menuHost: findBiliCommentMenuHost(path, actionRenderer),
       capturedAt: Date.now(),
@@ -320,6 +330,8 @@
       context.type,
       context.rootId,
       context.selectedReplyId,
+      context.source?.bvid || "",
+      context.source?.page || 1,
     ].join(":");
   }
 
@@ -385,7 +397,8 @@
     showToast("正在获取完整楼层…");
 
     try {
-      const thread = await fetchThread(context, {
+      const exportContext = { ...context, source: context.source || captureVideoSource(context) };
+      const thread = await fetchThread(exportContext, {
         task,
         progress: (current, total) => {
           const totalText = total > 0 ? ` / ${total}` : "";
@@ -398,15 +411,21 @@
 
       throwIfCancelled(task);
 
+      showToast("正在获取视频字幕…");
+      thread.subtitles = await fetchVideoSubtitles(thread.source, task);
+      throwIfCancelled(task);
+
       const markdown = formatThreadMarkdown(thread);
       deliverMarkdown(thread, markdown);
 
       const replyCountText = `${thread.exporter.actualReplyCount} 条回复`;
+      const subtitleText = thread.subtitles.status === "ok"
+        ? "，含视频字幕"
+        : "，字幕未附上，原因见文件";
+      const completeText = thread.exporter.complete ? "" : "，结果可能不完整";
       showToast(
-        thread.exporter.complete
-          ? `${action.successText}：${replyCountText}`
-          : `${action.successText}：${replyCountText}，结果可能不完整`,
-        thread.exporter.complete ? "success" : "warning"
+        `${action.successText}：${replyCountText}${subtitleText}${completeText}`,
+        thread.exporter.complete && thread.subtitles.status !== "failed" ? "success" : "warning"
       );
     } catch (error) {
       if (!isCancelledError(error)) {
@@ -752,9 +771,7 @@
         duplicateReplyCount: toNonNegativeInt(duplicateReplyCount),
       },
       source: {
-        title: getVideoTitle(),
-        url: location.href,
-        bvid: getBvidFromLocation(),
+        ...(context.source || captureVideoSource(context)),
         oid: String(context.oid),
         aid: String(context.oid),
         type: Number(context.type || CONFIG.commentType),
@@ -765,6 +782,181 @@
       root,
       replies,
     };
+  }
+
+  // ---------------------------------------------------------------------------
+  // Video subtitles (independent of vCaptions or other extensions)
+  // ---------------------------------------------------------------------------
+
+  function captureVideoSource(context) {
+    const url = new URL(location.href);
+    const page = Number(url.searchParams.get("p") || 1);
+    return {
+      title: getVideoTitle(),
+      url: url.href,
+      bvid: getBvidFromLocation(),
+      aid: String(context.oid),
+      type: normalizeCommentType(context.type),
+      page: Number.isSafeInteger(page) && page > 0 ? page : 1,
+    };
+  }
+
+  async function fetchVideoSubtitles(source, task) {
+    try {
+      throwIfCancelled(task);
+      if (source.type !== CONFIG.commentType) {
+        return { status: "unavailable", reason: "此评论区不属于普通视频，未附字幕。" };
+      }
+
+      const view = await requestSubtitleJson(buildApiUrl(API.videoView, { aid: source.aid }), task);
+      const video = view?.data;
+      if (String(video?.aid || "") !== String(source.aid)) {
+        throw new Error("视频信息与评论所属视频不一致");
+      }
+      if (source.bvid && video.bvid && source.bvid !== video.bvid) {
+        throw new Error("页面已切换，无法确认评论对应的视频字幕");
+      }
+
+      const pages = Array.isArray(video.pages) ? video.pages : [];
+      const page = source.page || 1;
+      const part = pages.find((item) => Number(item.page) === page) ||
+        (page === 1 && pages.length === 0 && video.cid ? { cid: video.cid, page: 1 } : null);
+      if (!part?.cid) throw new Error(`无法确定 P${page} 的视频 CID`);
+
+      source.cid = String(part.cid);
+      source.part = String(part.part || "");
+      const params = { aid: source.aid, cid: source.cid };
+      let lastError = null;
+      let gotSubtitleList = false;
+      const tracks = [];
+      const seenUrls = new Set();
+
+      for (const endpoint of API.players) {
+        throwIfCancelled(task);
+        try {
+          const player = await requestSubtitleJson(buildApiUrl(endpoint, params), task);
+          const subtitles = player?.data?.subtitle?.subtitles;
+          if (!Array.isArray(subtitles)) throw new Error("播放器未返回字幕列表");
+          gotSubtitleList = true;
+          for (const track of subtitles) {
+            const url = normalizeSubtitleUrl(track?.subtitle_url);
+            if (!url || seenUrls.has(url)) continue;
+            seenUrls.add(url);
+            tracks.push({ ...track, url });
+          }
+          if (tracks.length > 0) break;
+        } catch (error) {
+          if (isCancelledError(error)) throw error;
+          lastError = error;
+        }
+      }
+
+      if (tracks.length === 0) {
+        if (!gotSubtitleList) throw lastError || new Error("无法获取字幕列表");
+        return {
+          status: "unavailable",
+          reason: "当前分 P 未返回可下载的字幕；部分字幕需要登录 B 站后才能获取。",
+        };
+      }
+
+      tracks.sort((left, right) => subtitleTrackPriority(left) - subtitleTrackPriority(right));
+      for (const track of tracks.slice(0, CONFIG.subtitleTrackLimit)) {
+        throwIfCancelled(task);
+        try {
+          const payload = await requestSubtitleJson(track.url, task, true);
+          if (!Array.isArray(payload?.body)) throw new Error("字幕正文格式异常");
+          const cues = normalizeSubtitleCues(payload.body);
+          if (cues.length === 0) throw new Error("字幕正文为空");
+          return {
+            status: "ok",
+            language: String(track.lan || ""),
+            label: String(track.lan_doc || track.lan || "未知语言"),
+            autoGenerated: isAutomaticSubtitle(track),
+            cues,
+          };
+        } catch (error) {
+          if (isCancelledError(error)) throw error;
+          lastError = error;
+        }
+      }
+      throw lastError || new Error("无法下载字幕正文");
+    } catch (error) {
+      if (isCancelledError(error)) throw error;
+      return { status: "failed", reason: `字幕获取失败：${error?.message || String(error)}。评论仍已保留。` };
+    }
+  }
+
+  async function requestSubtitleJson(url, task, anonymous = false) {
+    throwIfCancelled(task);
+    const payload = await dependencies.requestJson(url, task, {
+      timeoutMs: CONFIG.subtitleRequestTimeoutMs,
+      retries: 1,
+      anonymous,
+    });
+    throwIfCancelled(task);
+    return payload;
+  }
+
+  function normalizeSubtitleUrl(value) {
+    if (typeof value !== "string" || !value.trim()) return "";
+    try {
+      const url = new URL(value, "https://www.bilibili.com");
+      if (url.protocol === "http:") url.protocol = "https:";
+      if (url.protocol !== "https:" || url.username || url.password || url.port) return "";
+      if (!/\.(?:hdslb|bilibili)\.com$/i.test(url.hostname)) return "";
+      return url.href;
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function isAutomaticSubtitle(track) {
+    return /^ai[-_]/i.test(String(track.lan || "")) ||
+      Number(track.ai_type) > 0 || /自动|智能|AI/i.test(String(track.lan_doc || ""));
+  }
+
+  function subtitleTrackPriority(track) {
+    const chinese = /^(?:ai[-_])?(?:zh|cmn)(?:[-_]|$)/i.test(String(track.lan || "")) ||
+      /中文|汉语|普通话/.test(String(track.lan_doc || ""));
+    return (chinese ? 0 : 10) + (isAutomaticSubtitle(track) ? 1 : 0);
+  }
+
+  function normalizeSubtitleCues(body) {
+    return body.flatMap((cue, index) => {
+      if (typeof cue?.content !== "string" || !cue.content.trim()) return [];
+      const from = Number(cue.from);
+      return [{
+        from: Number.isFinite(from) && from >= 0 ? from : null,
+        index,
+        text: cue.content.replace(/\r\n?/g, "\n").trim(),
+      }];
+    }).sort((left, right) =>
+      (left.from ?? Infinity) - (right.from ?? Infinity) || left.index - right.index
+    );
+  }
+
+  function appendVideoSubtitles(lines, thread) {
+    const subtitles = thread.subtitles;
+    if (!subtitles) return;
+    lines.push("", "## 视频字幕正文", "");
+    const source = thread.source;
+    lines.push(`> 当前分 P：P${source.page || 1}` +
+      (source.part ? ` · ${escapeSubtitleText(source.part)}` : "") +
+      (source.cid ? ` · CID ${source.cid}` : ""), "");
+    if (subtitles.status !== "ok") {
+      lines.push(escapeSubtitleText(subtitles.reason || "未获取到字幕。"));
+      return;
+    }
+    lines.push(`> 字幕：${escapeSubtitleText(subtitles.label)}` +
+      (subtitles.autoGenerated ? "（自动生成，可能存在识别误差）" : ""), "");
+    for (const cue of subtitles.cues) {
+      for (const line of cue.text.split("\n")) lines.push(`${escapeSubtitleText(line)}  `);
+    }
+  }
+
+  function escapeSubtitleText(text) {
+    return escapeMarkdownBodyLine(String(text || "").replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;").replace(/>/g, "&gt;"));
   }
 
   // ---------------------------------------------------------------------------
@@ -831,6 +1023,7 @@
     const graph = buildThreadGraph(thread);
 
     appendThreadMetadata(output, thread, graph);
+    appendVideoSubtitles(output, thread);
     output.push("", "## 阅读说明", "");
     output.push("- 评论按时间顺序平铺，不使用深层缩进。");
     output.push("- 每条评论使用导出内唯一编号，例如 `[0007]`。");
@@ -1360,14 +1553,15 @@
   // HTTP transport with retry and cancellation
   // ---------------------------------------------------------------------------
 
-  async function requestJsonWithRetry(url, task) {
+  async function requestJsonWithRetry(url, task, options = {}) {
     let lastError = null;
+    const retries = options.retries || CONFIG.requestRetries;
 
-    for (let attempt = 1; attempt <= CONFIG.requestRetries; attempt += 1) {
+    for (let attempt = 1; attempt <= retries; attempt += 1) {
       throwIfCancelled(task);
 
       try {
-        const payload = await requestJsonOnce(url, task);
+        const payload = await requestJsonOnce(url, task, options);
         throwIfCancelled(task);
 
         validateApiPayload(payload);
@@ -1376,7 +1570,7 @@
         if (isCancelledError(error)) throw error;
 
         lastError = error;
-        if (!isRetryableError(error) || attempt === CONFIG.requestRetries) {
+        if (!isRetryableError(error) || attempt === retries) {
           throw error;
         }
       }
@@ -1404,15 +1598,15 @@
     return error?.retryable !== false;
   }
 
-  function requestJsonOnce(url, task) {
+  function requestJsonOnce(url, task, options) {
     throwIfCancelled(task);
 
     return typeof GM_xmlhttpRequest === "function"
-      ? requestJsonByGm(url, task)
-      : requestJsonByFetch(url, task);
+      ? requestJsonByGm(url, task, options)
+      : requestJsonByFetch(url, task, options);
   }
 
-  function requestJsonByGm(url, task) {
+  function requestJsonByGm(url, task, options = {}) {
     return new Promise((resolve, reject) => {
       let settled = false;
       let requestHandle = null;
@@ -1436,9 +1630,9 @@
         method: "GET",
         url,
         responseType: "json",
-        anonymous: false,
-        withCredentials: true,
-        timeout: CONFIG.requestTimeoutMs,
+        anonymous: Boolean(options.anonymous),
+        withCredentials: !options.anonymous,
+        timeout: options.timeoutMs || CONFIG.requestTimeoutMs,
         headers: {
           Accept: "application/json, text/plain, */*",
         },
@@ -1487,13 +1681,18 @@
     });
   }
 
-  function requestJsonByFetch(url, task) {
+  function requestJsonByFetch(url, task, options = {}) {
     const controller = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, options.timeoutMs || CONFIG.requestTimeoutMs);
     const abortRequest = () => controller.abort();
     bindTaskAbort(task, abortRequest);
 
     return fetch(url, {
-      credentials: "include",
+      credentials: options.anonymous ? "omit" : "include",
       headers: {
         Accept: "application/json, text/plain, */*",
       },
@@ -1510,10 +1709,13 @@
         return response.json();
       })
       .catch((error) => {
+        if (task?.cancelled) throw new BceCancelledError();
+        if (timedOut) throw new BceTransportError("网络请求超时", true);
         if (error?.name === "AbortError") throw new BceCancelledError();
         throw error;
       })
       .finally(() => {
+        clearTimeout(timer);
         clearTaskAbort(task, abortRequest);
       });
   }

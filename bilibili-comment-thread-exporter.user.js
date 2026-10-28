@@ -2,7 +2,7 @@
 // @name         Bilibili Comment Thread Exporter
 // @name:zh-CN   B站评论楼层导出器
 // @namespace    https://space.bilibili.com/1937432404
-// @version      1.1.1
+// @version      1.2.0
 // @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/bilibili-comment-thread-exporter.user.js
 // @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/bilibili-comment-thread-exporter.user.js
 // @description  Download video subtitles and a complete Bilibili comment thread together as Markdown from the native three-dot menu.
@@ -26,7 +26,7 @@
 
   const META = Object.freeze({
     id: "bce-thread-exporter",
-    version: "1.1.1",
+    version: "1.2.0",
     installGuard: "__bceCommentExporterV1Installed",
   });
 
@@ -35,18 +35,21 @@
     replyPageSize: 20,
     maxReplyPages: 250,
     pageDelayMs: 250,
-    requestRetries: 3,
+    requestMaxAttempts: 3,
     retryBaseDelayMs: 350,
     requestTimeoutMs: 30000,
     subtitleRequestTimeoutMs: 8000,
     subtitleTrackLimit: 3,
+    subtitleParagraphChars: 260,
+    subtitleParagraphSeconds: 60,
+    subtitleParagraphGapSeconds: 2,
     menuContextTtlMs: 8000,
     menuInjectionDelaysMs: Object.freeze([0, 25, 75, 150, 300, 600, 1000]),
     parentExcerptLength: 60,
     parentExcerptMinDepth: 2,
     childPreviewLimit: 12,
     breadcrumbMinDepth: 4,
-    breadcrumbMaxSegments: 5,
+    breadcrumbMaxSegments: 6,
   });
 
   const API = Object.freeze({
@@ -86,11 +89,13 @@
       observer: null,
       observedRoot: null,
       observerTimer: 0,
+      injectionTimers: [],
     },
     export: {
       activeTask: null,
       nextTaskId: 0,
     },
+    ui: { toastTimer: 0 },
   };
 
   const dependencies = {
@@ -144,7 +149,7 @@
     const actionRenderer = findCommentActionRendererInPath(path);
     if (!actionRenderer) return;
 
-    const baseContext = resolveCommentExportContext(actionRenderer);
+    const baseContext = resolveCommentExportContext(actionRenderer, path);
     if (!baseContext) return;
 
     const context = {
@@ -200,12 +205,15 @@
   function activateMenuContext(context) {
     runtime.menu.context = context;
     stopMenuObserver();
+    for (const timer of runtime.menu.injectionTimers) clearTimeout(timer);
+    runtime.menu.injectionTimers = [];
 
     for (const delayMs of CONFIG.menuInjectionDelaysMs) {
-      window.setTimeout(() => {
+      const timer = window.setTimeout(() => {
         if (runtime.menu.context !== context) return;
         injectMenuActions(context);
       }, delayMs);
+      runtime.menu.injectionTimers.push(timer);
     }
   }
 
@@ -243,18 +251,22 @@
     const contextKey = makeContextKey(context);
     const existing = options.querySelector?.(selector);
 
-    if (existing?.dataset?.bceContextKey === contextKey) return existing;
+    if (existing?.dataset?.bceContextKey === contextKey) {
+      existing.__bceContext = context;
+      return existing;
+    }
     existing?.remove?.();
 
     const item = createNativeStyleMenuItem(options);
     item.classList?.add(DOM.exportItemClass);
     item.dataset.bceAction = action.id;
     item.dataset.bceContextKey = contextKey;
+    item.__bceContext = context;
     item.textContent = action.label;
     item.title = action.title;
     item.style.cursor = "pointer";
 
-    bindMenuActionEvents(item, context, action);
+    bindMenuActionEvents(item, action);
     options.appendChild(item);
     return item;
   }
@@ -269,7 +281,7 @@
     return item;
   }
 
-  function bindMenuActionEvents(item, context, action) {
+  function bindMenuActionEvents(item, action) {
     const stopNativeAction = (event) => {
       event.stopPropagation();
       event.stopImmediatePropagation?.();
@@ -280,7 +292,7 @@
     item.addEventListener("click", (event) => {
       event.preventDefault();
       stopNativeAction(event);
-      runExport(context, action, item);
+      runExport(item.__bceContext, action, item);
     });
   }
 
@@ -340,7 +352,7 @@
   // ---------------------------------------------------------------------------
 
   function getReplyDataFromElement(element) {
-    const data = element?.__data;
+    const data = element?.__data || element?.wrappedJSObject?.__data;
     if (!data || typeof data !== "object") return null;
 
     const candidates = [
@@ -360,8 +372,10 @@
     ) || null;
   }
 
-  function resolveCommentExportContext(actionRenderer) {
-    const reply = getReplyDataFromElement(actionRenderer);
+  function resolveCommentExportContext(actionRenderer, path = []) {
+    const reply = getReplyDataFromElement(actionRenderer) || path
+      .filter((element) => /^bili-comment-(?:reply-|thread-)?renderer$/.test(tagNameOf(element)))
+      .map(getReplyDataFromElement).find(Boolean);
     if (!reply) return null;
 
     const selectedReplyId = getReplyId(reply);
@@ -422,7 +436,9 @@
       const subtitleText = thread.subtitles.status === "ok"
         ? "，含视频字幕"
         : "，字幕未附上，原因见文件";
-      const completeText = thread.exporter.complete ? "" : "，结果可能不完整";
+      const completeText = thread.exporter.truncated
+        ? "，分页提前停止"
+        : thread.exporter.countMismatch ? "，接口计数有差额" : "";
       showToast(
         `${action.successText}：${replyCountText}${subtitleText}${completeText}`,
         thread.exporter.complete && thread.subtitles.status !== "failed" ? "success" : "warning"
@@ -535,6 +551,7 @@
     let expectedReplyCount = 0;
     let truncated = false;
     let pagesFetched = 0;
+    let paginationStopReason = "";
 
     for (let pageNumber = 1; pageNumber <= CONFIG.maxReplyPages; pageNumber += 1) {
       throwIfCancelled(task);
@@ -565,6 +582,7 @@
       });
 
       if (stopReason) {
+        paginationStopReason = stopReason;
         truncated = isIncompleteStop(stopReason, accumulator.size, expectedReplyCount);
         break;
       }
@@ -590,6 +608,8 @@
       replies,
       selected,
       complete,
+      stopReason: paginationStopReason,
+      truncated,
       pagesFetched,
       expectedReplyCount,
       actualReplyCount,
@@ -709,7 +729,7 @@
 
   function isIncompleteStop(reason, actualCount, expectedCount) {
     if (reason === "complete") return false;
-    if (reason === "empty-page") return expectedCount > actualCount;
+    if (reason === "empty-page") return false;
     if (reason === "duplicate-page") return true;
     if (reason === "page-limit") return expectedCount === 0 || actualCount < expectedCount;
     return false;
@@ -751,6 +771,8 @@
     replies,
     selected,
     complete,
+    stopReason,
+    truncated,
     pagesFetched,
     expectedReplyCount,
     actualReplyCount,
@@ -762,7 +784,11 @@
         version: META.version,
         exportedAt: new Date().toISOString(),
         complete,
-        truncated: !complete,
+        truncated,
+        paginationComplete: !truncated,
+        stopReason,
+        countMismatch: expectedReplyCount > actualReplyCount,
+        countGap: Math.max(0, expectedReplyCount - actualReplyCount),
         pageSize: CONFIG.replyPageSize,
         maxPages: CONFIG.maxReplyPages,
         pagesFetched,
@@ -793,7 +819,7 @@
     const page = Number(url.searchParams.get("p") || 1);
     return {
       title: getVideoTitle(),
-      url: url.href,
+      url: cleanVideoUrl(url.href),
       bvid: getBvidFromLocation(),
       aid: String(context.oid),
       type: normalizeCommentType(context.type),
@@ -818,6 +844,8 @@
       if (source.bvid && video.bvid && source.bvid !== video.bvid) {
         throw new Error("页面已切换，无法确认评论对应的视频字幕");
       }
+      if (!source.bvid && video.bvid) source.bvid = String(video.bvid);
+      if (video.title) source.title = String(video.title);
 
       const pages = Array.isArray(video.pages) ? video.pages : [];
       const page = source.page || 1;
@@ -830,6 +858,7 @@
       const params = { aid: source.aid, cid: source.cid };
       let lastError = null;
       let gotSubtitleList = false;
+      let sawTracksWithoutUrls = false;
       const tracks = [];
       const seenUrls = new Set();
 
@@ -842,6 +871,8 @@
           const subtitles = player?.data?.subtitle?.subtitles;
           if (!Array.isArray(subtitles)) throw new Error("播放器未返回字幕列表");
           gotSubtitleList = true;
+          if (subtitles.length === 0) break;
+          sawTracksWithoutUrls = true;
           for (const track of subtitles) {
             const url = normalizeSubtitleUrl(track?.subtitle_url);
             if (!url || seenUrls.has(url)) continue;
@@ -859,7 +890,9 @@
         if (!gotSubtitleList) throw lastError || new Error("无法获取字幕列表");
         return {
           status: "unavailable",
-          reason: "当前分 P 未返回可下载的字幕；部分字幕需要登录 B 站后才能获取。",
+          reason: sawTracksWithoutUrls
+            ? "检测到字幕轨道，但未返回可下载链接；请确认登录状态或视频访问权限。"
+            : "当前分 P 未提供平台字幕轨道。",
         };
       }
 
@@ -895,7 +928,8 @@
     try {
       const payload = await dependencies.requestJson(url, task, {
         timeoutMs: CONFIG.subtitleRequestTimeoutMs,
-        retries: 1,
+        maxAttempts: 2,
+        expectBiliEnvelope: !anonymous,
         anonymous,
       });
       throwIfCancelled(task);
@@ -938,9 +972,10 @@
   function normalizeSubtitleCues(body) {
     return body.flatMap((cue, index) => {
       if (typeof cue?.content !== "string" || !cue.content.trim()) return [];
-      const from = Number(cue.from);
+      const from = cue.from == null ? NaN : Number(cue.from);
       return [{
         from: Number.isFinite(from) && from >= 0 ? from : null,
+        to: cue.to != null && Number.isFinite(Number(cue.to)) && Number(cue.to) >= from ? Number(cue.to) : null,
         index,
         text: cue.content.replace(/\r\n?/g, "\n").trim(),
       }];
@@ -963,14 +998,14 @@
     }
     lines.push(`> 字幕：${escapeSubtitleText(subtitles.label)}` +
       (subtitles.autoGenerated ? "（自动生成，可能存在识别误差）" : ""), "");
-    for (const cue of subtitles.cues) {
-      for (const line of cue.text.split("\n")) lines.push(`${escapeSubtitleText(line)}  `);
+    for (const paragraph of groupSubtitleCues(subtitles.cues)) {
+      appendPlainText(lines, paragraph);
+      lines.push("");
     }
   }
 
   function escapeSubtitleText(text) {
-    return escapeMarkdownBodyLine(String(text || "").replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;").replace(/>/g, "&gt;"));
+    return escapeMarkdownBodyLine(text);
   }
 
   // ---------------------------------------------------------------------------
@@ -1027,34 +1062,20 @@
   function normalizePictures(pictures) {
     if (!Array.isArray(pictures)) return [];
 
-    return pictures
-      .map((picture) => picture?.img_src || picture?.src || "")
-      .filter(Boolean);
+    return pictures.map((picture) => safePictureUrl(picture?.img_src || picture?.src || "")).filter(Boolean);
   }
 
   function formatThreadMarkdown(thread) {
     const output = [];
     const graph = buildThreadGraph(thread);
-
     appendThreadMetadata(output, thread, graph);
     appendVideoSubtitles(output, thread);
-    output.push("", "## 阅读说明", "");
-    output.push("- 评论按时间顺序平铺，不使用深层缩进。");
-    output.push("- 每条评论使用导出内唯一编号，例如 `[0007]`。");
-    output.push("- “回复”表示接口明确给出的 `parent`；“推断回复”表示 `parent` 缺失时依据 `root` 补全。");
-    output.push("- L1 直接回复不重复根评论摘要；L2-L3 不重复输出完整路径；L4 及以上保留压缩路径。");
-    output.push("- 回复关系异常不会丢弃评论；异常节点会单独进入文末索引。");
-
-    output.push("", "## 根评论", "");
+    output.push("", '<a id="comment-thread"></a>', "", "## 评论楼层", "");
+    output.push("> 按时间平铺；编号链接定位具体评论；“推断回复”依据 root 补全；L 为距根层级，“断链”只表示分支内层级。", "");
     appendReplyMarkdown(output, graph.rootNode, graph);
-
-    output.push("", "## 回复", "");
-    if (graph.replyNodes.length === 0) {
-      output.push("_没有获取到二级回复。_");
-    } else {
-      for (const node of graph.replyNodes) appendReplyMarkdown(output, node, graph);
-    }
-
+    for (const node of graph.replyNodes) appendReplyMarkdown(output, node, graph);
+    if (graph.replyNodes.length === 0) output.push("_没有获取到二级回复。_", "");
+    appendExportDiagnostics(output, thread, graph);
     appendMissingParentIndex(output, graph);
     appendRelationIssueIndex(output, graph);
     appendLargeChildrenIndexes(output, graph);
@@ -1063,30 +1084,41 @@
   }
 
   function appendThreadMetadata(lines, thread, graph) {
-    lines.push(`# ${thread.source.title || "Bilibili 评论楼层"}`);
-    lines.push("");
-    lines.push(`- 页面：${thread.source.url || ""}`);
-    lines.push(`- BV：${thread.source.bvid || ""}`);
-    lines.push(`- AV/OID：${thread.source.oid || thread.source.aid || ""}`);
-    lines.push(`- 根评论 rpid：${thread.source.rootRpid || ""}`);
-    lines.push(`- 选中评论 rpid：${thread.source.selectedRpid || thread.source.rootRpid || ""}`);
-
-    const selectedNode = graph.nodeById.get(String(thread.source.selectedRpid || ""));
-    if (selectedNode) {
-      lines.push(`- 选中评论编号：[${selectedNode.label}](#${selectedNode.anchor})`);
+    const source = thread.source;
+    const stats = thread.exporter;
+    lines.push(`# ${escapeMarkdown(String(source.title || "Bilibili 评论楼层").replace(/\s+/g, " "))}`, "");
+    lines.push(`- 视频：[${escapeMarkdown(source.bvid || `av${source.oid || source.aid || ""}`)}](${cleanVideoUrl(source.url)}) · P${source.page || 1}` +
+      (source.part ? ` · ${escapeMarkdown(source.part)}` : "") + (source.cid ? ` · CID ${source.cid}` : ""));
+    const directCount = (graph.childrenById.get(graph.rootId) || []).length;
+    lines.push(`- 楼层：根评论 rpid ${source.rootRpid || ""} · 回复数：${stats.actualReplyCount}` +
+      ` · 直接回复 ${directCount} 条 · 其他回复 ${graph.replyNodes.length - directCount} 条`);
+    lines.push(`- 导出时间：${stats.exportedAt ? formatTime(Date.parse(stats.exportedAt) / 1000) : formatTime(Date.now() / 1000)}`);
+    const selectedNode = graph.nodeById.get(String(source.selectedRpid || ""));
+    if (selectedNode && !selectedNode.isRoot) {
+      lines.push(`- 导出入口：[${selectedNode.label}](#${selectedNode.anchor}) · rpid ${source.selectedRpid}`);
     }
+    if (!stats.complete || graph.integrity.missing || graph.integrity.abnormal) {
+      lines.push("- 完整性提示：存在计数差额、分页停止或回复关系缺口，详见[导出诊断](#export-diagnostics)。");
+    }
+    lines.push("", "[跳至评论楼层](#comment-thread) · [导出诊断](#export-diagnostics)");
+  }
 
-    lines.push(`- 导出时间：${formatTime(Date.now() / 1000)}`);
-    const expected = thread.exporter.expectedReplyCount;
-    lines.push(`- 回复数：${thread.exporter.actualReplyCount}` + (expected > 0 ? ` / ${expected}` : ""));
-    lines.push(`- 关系完整度：${graph.integrity.explicitResolved} / ${graph.integrity.total}（明确 parent 可解析）`);
-    lines.push(`- 推断关系：${graph.integrity.inferred}`);
-    lines.push(`- 缺失父消息：${graph.missingParents.length}（涉及 ${graph.integrity.missing} 条回复）`);
-    lines.push(`- 异常关系：${graph.integrity.abnormal}`);
-    lines.push(`- 重复 rpid：${toNonNegativeInt(thread.exporter.duplicateReplyCount)}`);
-
-    if (!thread.exporter.complete) {
-      lines.push("- 注意：接口分页提前结束、重复或达到上限，导出结果可能不完整");
+  function appendExportDiagnostics(lines, thread, graph) {
+    const stats = thread.exporter;
+    lines.push("", '<a id="export-diagnostics"></a>', "", "## 导出诊断与关系索引", "");
+    const summary = [`实际回复 ${stats.actualReplyCount} / 接口计数 ${stats.expectedReplyCount || 0}`];
+    if (stats.pagesFetched != null) summary.push(`请求 ${stats.pagesFetched} 页`);
+    const stopLabels = { complete: "达到接口计数", "empty-page": "遇到空页", "duplicate-page": "重复页且无新增回复", "page-limit": "达到分页上限" };
+    if (stats.stopReason) summary.push(`结束原因：${stopLabels[stats.stopReason] || stats.stopReason}`);
+    lines.push(`- ${summary.join(" · ")}`);
+    lines.push(`- 关系完整度：${graph.integrity.explicitResolved} / ${graph.integrity.total}（明确 parent 可解析）` +
+      ` · 推断关系：${graph.integrity.inferred} · 缺失父消息：${graph.missingParents.length}（涉及 ${graph.integrity.missing} 条回复）` +
+      ` · 异常关系：${graph.integrity.abnormal} · 重复 rpid：${toNonNegativeInt(stats.duplicateReplyCount)}`);
+    if (stats.truncated || (!stats.complete && !stats.countMismatch)) {
+      lines.push("- 分页提前停止，结果可能不完整；请结合结束原因判断。");
+    }
+    if (stats.countMismatch) {
+      lines.push(`- 接口计数差额：${stats.countGap} 条。接口计数与实际返回不一致，原因无法确定；不等同于脚本分页截断。`);
     }
   }
 
@@ -1159,6 +1191,8 @@
     }
 
     analyzeDepthsAndCycles(graph);
+    buildLocalDepths(graph);
+    assignAuthorIdentity(graph, thread.source?.selectedRpid);
     detectTemporalAnomalies(graph);
     buildPathSummaries(graph);
 
@@ -1281,6 +1315,48 @@
     }
   }
 
+  function buildLocalDepths(graph) {
+    const queue = [];
+    for (const node of [graph.rootNode, ...graph.replyNodes]) {
+      node.chainDepth = node.depth;
+      node.missingAncestor = "";
+      const parentId = graph.parentById.get(node.id);
+      if (!node.isRoot && node.depth == null && (!parentId || !graph.nodeById.has(parentId))) {
+        node.chainDepth = 1;
+        node.missingAncestor = parentId || "";
+        queue.push(node);
+      }
+    }
+    for (let index = 0; index < queue.length; index += 1) {
+      const node = queue[index];
+      for (const child of graph.childrenById.get(node.id) || []) {
+        if (child.chainDepth != null) continue;
+        child.chainDepth = node.chainDepth + 1;
+        child.missingAncestor = node.missingAncestor;
+        queue.push(child);
+      }
+    }
+  }
+
+  function assignAuthorIdentity(graph, selectedId) {
+    const counts = new Map();
+    const nodes = [graph.rootNode, ...graph.replyNodes];
+    for (const node of nodes) {
+      const mid = String(node.reply?.user?.mid || "");
+      node.authorKey = mid ? `mid:${mid}` : `message:${node.id}`;
+      counts.set(node.authorKey, (counts.get(node.authorKey) || 0) + 1);
+    }
+    const seen = new Map();
+    const rootMid = String(graph.rootNode.reply?.user?.mid || "");
+    for (const node of nodes) {
+      node.authorTotal = counts.get(node.authorKey);
+      node.authorOrdinal = (seen.get(node.authorKey) || 0) + 1;
+      seen.set(node.authorKey, node.authorOrdinal);
+      node.isLayerAuthor = Boolean(rootMid && String(node.reply?.user?.mid || "") === rootMid);
+      node.isSelected = !node.isRoot && node.id === String(selectedId || "");
+    }
+  }
+
   function detectTemporalAnomalies(graph) {
     for (const node of graph.replyNodes) {
       const parentId = graph.parentById.get(node.id);
@@ -1296,42 +1372,27 @@
   }
 
   function buildPathSummaries(graph) {
-    if (!graph.rootId) return;
-
-    graph.pathSummaryById.set(graph.rootId, {
-      length: 1,
-      first: graph.rootId,
-      tail: [graph.rootId],
-      full: [graph.rootId],
-    });
-
-    const buckets = new Map();
-    let maxDepth = 0;
-    for (const node of graph.replyNodes) {
-      if (node.depth == null || node.depth < 1) continue;
-      if (!buckets.has(node.depth)) buckets.set(node.depth, []);
-      buckets.get(node.depth).push(node);
-      if (node.depth > maxDepth) maxDepth = node.depth;
+    const queue = [];
+    for (const node of [graph.rootNode, ...graph.replyNodes]) {
+      const parentId = graph.parentById.get(node.id);
+      if (node.chainDepth == null || (parentId && graph.nodeById.has(parentId))) continue;
+      graph.pathSummaryById.set(node.id, { length: 1, head: [node.id], tail: [node.id], full: [node.id], missingAncestor: node.missingAncestor });
+      queue.push(node);
     }
-
-    for (let depth = 1; depth <= maxDepth; depth += 1) {
-      for (const node of buckets.get(depth) || []) {
-        const parentId = graph.parentById.get(node.id);
-        const parentSummary = parentId ? graph.pathSummaryById.get(parentId) : null;
-        if (!parentSummary) continue;
-
+    for (let index = 0; index < queue.length; index += 1) {
+      const node = queue[index];
+      const parentSummary = graph.pathSummaryById.get(node.id);
+      for (const child of graph.childrenById.get(node.id) || []) {
+        if (child.chainDepth == null || graph.pathSummaryById.has(child.id)) continue;
         const length = parentSummary.length + 1;
-        const full = length <= CONFIG.breadcrumbMaxSegments && parentSummary.full
-          ? [...parentSummary.full, node.id]
-          : null;
-        const tail = [...parentSummary.tail, node.id].slice(-3);
-
-        graph.pathSummaryById.set(node.id, {
+        graph.pathSummaryById.set(child.id, {
           length,
-          first: parentSummary.first,
-          tail,
-          full,
+          head: parentSummary.head.length < 2 ? [...parentSummary.head, child.id] : parentSummary.head,
+          tail: [...parentSummary.tail, child.id].slice(-3),
+          full: length <= CONFIG.breadcrumbMaxSegments && parentSummary.full ? [...parentSummary.full, child.id] : null,
+          missingAncestor: parentSummary.missingAncestor,
         });
+        queue.push(child);
       }
     }
   }
@@ -1365,30 +1426,30 @@
 
   function appendReplyMarkdown(lines, node, graph) {
     if (!node?.reply) return;
-
     const reply = node.reply;
     const name = reply.user?.name || `mid:${reply.user?.mid || "unknown"}`;
     const metadata = [];
-    if (reply.user?.mid) metadata.push(`UID ${reply.user.mid}`);
-    if (reply.time?.local) metadata.push(reply.time.local);
+    if (node.isLayerAuthor) metadata.push("层主");
+    if (node.authorTotal > 1) metadata.push(`第 ${node.authorOrdinal} 次发言`);
+    if (node.isSelected) metadata.push("导出入口");
+    if (reply.user?.mid) metadata.push(`UID ${escapeMarkdown(reply.user.mid)}`);
+    if (reply.time?.local) metadata.push(escapeMarkdown(reply.time.local));
     metadata.push(`点赞 ${toNonNegativeInt(reply.like)}`);
-    if (reply.location) metadata.push(reply.location);
+    if (reply.location) metadata.push(escapeMarkdown(reply.location));
     if (node.depth != null) metadata.push(`L${node.depth}`);
-
-    lines.push(`<a id="${node.anchor}"></a>`);
-    lines.push(`**[${node.label}] ${escapeMarkdown(name)}**` + (metadata.length ? ` · ${metadata.join(" · ")}` : ""));
-
-    appendParentRelation(lines, node, graph);
-    appendChildrenRelation(lines, node, graph);
-
+    else if (node.chainDepth != null) metadata.push(`断链 L${node.chainDepth}（分支内）`);
+    lines.push(`<a id="${node.anchor}"></a> **[${node.label}] ${escapeMarkdown(name)}**` + (metadata.length ? ` · ${metadata.join(" · ")}` : ""), "");
+    const relations = [];
+    appendParentRelation(relations, node, graph);
+    appendChildrenRelation(relations, node, graph);
     const breadcrumb = buildBreadcrumb(node, graph);
-    if (breadcrumb) lines.push(`> 路径：${breadcrumb}`);
-
-    const message = String(reply.message || "(无正文)").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    if (breadcrumb) relations.push(`> 路径：${breadcrumb}`);
+    relations.forEach((line, index) => lines.push(line + (index < relations.length - 1 ? "  " : "")));
+    if (relations.length) lines.push("");
+    appendPlainText(lines, reply.message || "(无正文)");
+    const pictures = (reply.pictures || []).map(safePictureUrl).filter(Boolean);
+    if (pictures.length) lines.push("", `配图：${pictures.map((url, index) => `[图 ${index + 1}](${url})`).join(" · ")}`);
     lines.push("");
-    for (const line of message.split("\n")) lines.push(`> ${escapeMarkdownBodyLine(line)}`);
-    for (const picture of reply.pictures || []) lines.push(`> ![](${picture})`);
-    lines.push("", "---", "");
   }
 
   function appendParentRelation(lines, node, graph) {
@@ -1442,7 +1503,7 @@
 
   function appendChildrenRelation(lines, node, graph) {
     const children = graph.childrenById.get(node.id) || [];
-    if (children.length === 0) return;
+    if (node.isRoot || children.length === 0) return;
 
     const preview = children.slice(0, CONFIG.childPreviewLimit).map((child) => {
       const childName = child.reply.user?.name || `mid:${child.reply.user?.mid || "unknown"}`;
@@ -1481,33 +1542,23 @@
   }
 
   function buildBreadcrumb(node, graph) {
-    if (
-      node.isRoot ||
-      node.depth == null ||
-      node.depth < CONFIG.breadcrumbMinDepth
-    ) {
-      return "";
-    }
-
+    if (node.isRoot || node.chainDepth == null) return "";
+    if (node.depth != null ? node.depth < CONFIG.breadcrumbMinDepth : node.chainDepth < 2) return "";
     const summary = graph.pathSummaryById.get(node.id);
     if (!summary || summary.length < 2) return "";
-
     const linkById = (id) => {
       const target = graph.nodeById.get(id);
       return target ? `[${target.label}](#${target.anchor})` : "";
     };
-
-    if (summary.full) return summary.full.map(linkById).filter(Boolean).join(" → ");
-
-    const first = linkById(summary.first);
-    const tail = summary.tail.map(linkById).filter(Boolean);
-    return [first, "…", ...tail].filter(Boolean).join(" → ");
+    const parts = summary.full ? summary.full.map(linkById) : [...summary.head.map(linkById), "…", ...summary.tail.map(linkById)];
+    if (summary.missingAncestor) parts.unshift(`缺失父消息 rpid ${escapeMarkdown(summary.missingAncestor)}`);
+    return parts.filter(Boolean).join(" → ");
   }
 
   function appendMissingParentIndex(lines, graph) {
     if (graph.missingParents.length === 0) return;
 
-    lines.push("", "## 缺失父消息索引", "");
+    lines.push("", "### 缺失父消息索引", "");
     lines.push("以下父消息没有出现在本次导出数据中，子评论仍被保留：", "");
 
     for (const group of graph.missingParents) {
@@ -1523,7 +1574,7 @@
     const abnormalNodes = graph.replyNodes.filter((node) => (graph.issuesById.get(node.id)?.size || 0) > 0);
     if (abnormalNodes.length === 0) return;
 
-    lines.push("", "## 关系异常索引", "");
+    lines.push("", "### 关系异常索引", "");
     for (const node of abnormalNodes) {
       const issues = graph.issuesById.get(node.id) || new Set();
       const labels = [];
@@ -1536,17 +1587,17 @@
   }
 
   function appendLargeChildrenIndexes(lines, graph) {
-    const largeNodes = [graph.rootNode, ...graph.replyNodes].filter((node) => {
+    const largeNodes = graph.replyNodes.filter((node) => {
       const children = graph.childrenById.get(node.id) || [];
       return children.length > CONFIG.childPreviewLimit;
     });
     if (largeNodes.length === 0) return;
 
-    lines.push("", "## 大分叉完整索引", "");
+    lines.push("", "### 大分叉完整索引", "");
     for (const node of largeNodes) {
       const children = graph.childrenById.get(node.id) || [];
       lines.push(`<a id="children-${node.label}"></a>`);
-      lines.push(`### [${node.label}] 的直接回复（${children.length}）`, "");
+      lines.push(`#### [${node.label}] 的直接回复（${children.length}）`, "");
       for (const child of children) {
         const name = child.reply.user?.name || `mid:${child.reply.user?.mid || "unknown"}`;
         lines.push(`- [${child.label}](#${child.anchor}) ${escapeMarkdown(name)}`);
@@ -1556,54 +1607,106 @@
   }
 
   function escapeMarkdownBodyLine(line) {
-    const escaped = escapeMarkdown(String(line || ""));
-    return escaped
-      .replace(/^([>#])/g, "\\$1")
-      .replace(/^([-+])\s/g, "\\$1 ")
-      .replace(/^(\d+)\.\s/g, "$1\\. ");
+    return escapeMarkdown(String(line ?? ""))
+      .replace(/^( {0,3})([>#])/g, "$1\\$2")
+      .replace(/^( {0,3})([-+])(?=\s|$)/g, "$1\\$2")
+      .replace(/^( {0,3})(\d+)([.)])(?=\s)/g, "$1$2\\$3")
+      .replace(/^( {0,3})([=-]+)(\s*)$/g, "$1\\$2$3")
+      .replace(/^(?: {4,}|\t)[ \t]*/g, (space) => space.replace(/ /g, "&#32;").replace(/\t/g, "&#9;"));
   }
 
-  // ---------------------------------------------------------------------------
-  // HTTP transport with retry and cancellation
-  // ---------------------------------------------------------------------------
+  function appendPlainText(lines, text) {
+    const parts = String(text).replace(/\r\n?/g, "\n").split("\n");
+    parts.forEach((line, index) => {
+      lines.push(line ? escapeMarkdownBodyLine(line) + (index < parts.length - 1 && parts[index + 1] ? "  " : "") : "");
+    });
+  }
+
+  function safePictureUrl(value) {
+    if (typeof value !== "string" || !value.trim()) return "";
+    const url = normalizeSubtitleUrl(value);
+    return url.replace(/\(/g, "%28").replace(/\)/g, "%29");
+  }
+
+  function cleanVideoUrl(value) {
+    try {
+      const url = new URL(value);
+      if (url.hostname !== "www.bilibili.com" || !/^\/video\/(?:BV[\da-z]+|av\d+)\/?$/i.test(url.pathname)) return "";
+      const page = Number(url.searchParams.get("p"));
+      const clean = new URL(url.pathname, "https://www.bilibili.com");
+      if (Number.isSafeInteger(page) && page > 1) clean.searchParams.set("p", String(page));
+      return clean.href;
+    } catch (_) {
+      return "";
+    }
+  }
+
+  function groupSubtitleCues(cues) {
+    const paragraphs = [];
+    let text = "";
+    let start = null;
+    let previous = null;
+    for (const cue of cues) {
+      const gap = previous && cue.from != null && previous.from != null
+        ? cue.from - (previous.to ?? previous.from) : 0;
+      const duration = start != null && cue.from != null ? cue.from - start : 0;
+      const hasBreak = cue.text.includes("\n");
+      const gapLimit = previous?.to == null ? 6 : CONFIG.subtitleParagraphGapSeconds;
+      if (text && (gap >= gapLimit || duration >= CONFIG.subtitleParagraphSeconds ||
+          Array.from(text).length + Array.from(cue.text).length > CONFIG.subtitleParagraphChars ||
+          hasBreak || previous?.text.includes("\n"))) {
+        paragraphs.push(text);
+        text = "";
+        start = null;
+      }
+      if (!text) start = cue.from;
+      text += (text ? " " : "") + cue.text;
+      previous = cue;
+    }
+    if (text) paragraphs.push(text);
+    return paragraphs;
+  }
 
   async function requestJsonWithRetry(url, task, options = {}) {
     let lastError = null;
-    const retries = options.retries || CONFIG.requestRetries;
+    const maxAttempts = options.maxAttempts ?? CONFIG.requestMaxAttempts;
+    if (!Number.isInteger(maxAttempts) || maxAttempts < 1) {
+      throw new RangeError("maxAttempts 必须为正整数");
+    }
 
-    for (let attempt = 1; attempt <= retries; attempt += 1) {
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       throwIfCancelled(task);
 
       try {
         const payload = await requestJsonOnce(url, task, options);
         throwIfCancelled(task);
 
-        validateApiPayload(payload);
+        validateApiPayload(payload, options.expectBiliEnvelope !== false);
         return payload;
       } catch (error) {
         if (isCancelledError(error)) throw error;
 
         lastError = error;
-        if (!isRetryableError(error) || attempt === retries) {
+        if (!isRetryableError(error) || attempt === maxAttempts) {
           throw error;
         }
       }
 
-      await delay(CONFIG.retryBaseDelayMs * attempt, task);
+      await dependencies.waitBetweenPages(CONFIG.retryBaseDelayMs * attempt, task);
     }
 
-    throw lastError || new Error("评论接口请求失败");
+    throw lastError || new Error("接口请求失败");
   }
 
-  function validateApiPayload(payload) {
+  function validateApiPayload(payload, expectBiliEnvelope = true) {
     if (!payload || typeof payload !== "object") {
       throw new BceTransportError("接口返回为空", true);
     }
 
-    if (Object.prototype.hasOwnProperty.call(payload, "code") && payload.code !== 0) {
+    if (expectBiliEnvelope && Object.prototype.hasOwnProperty.call(payload, "code") && Number(payload.code) !== 0) {
       throw new BceApiError(
         Number(payload.code),
-        payload.message || payload.msg || `评论接口返回异常：${payload.code}`
+        payload.message || payload.msg || `接口返回异常：${payload.code}`
       );
     }
   }
@@ -1691,7 +1794,7 @@
         onabort: () => finish(reject, new BceCancelledError()),
       });
 
-      bindTaskAbort(task, abortRequest);
+      if (!settled) bindTaskAbort(task, abortRequest);
     });
   }
 
@@ -1803,6 +1906,7 @@
 
   function getVideoTitle() {
     return (
+      document.querySelector?.("h1.video-title, .video-title-href")?.textContent?.trim() ||
       document.querySelector?.("h1")?.textContent?.trim() ||
       String(document.title || "").replace(/_哔哩哔哩_bilibili$/, "").trim()
     );
@@ -1815,7 +1919,8 @@
   }
 
   function escapeMarkdown(text) {
-    return String(text || "").replace(/([\\*_\`[\]])/g, "\\$1");
+    return String(text ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/([\\*_\`[\]|~])/g, "\\$1");
   }
 
   function downloadText(fileName, text, type) {
@@ -1843,9 +1948,8 @@
   function showToast(message, kind) {
     if (!document.body) return;
 
-    document.getElementById(`${META.id}-toast`)?.remove();
-
-    const toast = document.createElement("div");
+    if (runtime.ui.toastTimer) clearTimeout(runtime.ui.toastTimer);
+    const toast = document.getElementById(`${META.id}-toast`) || document.createElement("div");
     toast.id = `${META.id}-toast`;
     toast.textContent = String(message || "");
     toast.style.cssText = [
@@ -1863,8 +1967,8 @@
       "pointer-events:none",
     ].join(";");
 
-    document.body.appendChild(toast);
-    window.setTimeout(() => {
+    if (!toast.isConnected) document.body.appendChild(toast);
+    runtime.ui.toastTimer = window.setTimeout(() => {
       if (toast.isConnected) toast.remove();
     }, kind === "error" ? 5000 : 2600);
   }
@@ -1876,8 +1980,15 @@
   }
 
   function delay(ms, task) {
+    throwIfCancelled(task);
     return new Promise((resolve, reject) => {
-      window.setTimeout(() => {
+      const abort = () => {
+        clearTimeout(timer);
+        clearTaskAbort(task, abort);
+        reject(new BceCancelledError());
+      };
+      const timer = window.setTimeout(() => {
+        clearTaskAbort(task, abort);
         try {
           throwIfCancelled(task);
           resolve();
@@ -1885,6 +1996,7 @@
           reject(error);
         }
       }, ms);
+      bindTaskAbort(task, abort);
     });
   }
 })();

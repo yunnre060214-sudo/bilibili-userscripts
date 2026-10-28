@@ -3,7 +3,6 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
-const { JSDOM } = require('jsdom');
 
 const code = fs.readFileSync(path.join(__dirname, '..', 'bilibili-comment-thread-exporter.user.js'), 'utf8');
 
@@ -89,7 +88,7 @@ test('subtitles use current P2 CID and prefer human Chinese over AI Chinese or E
   assert.equal(requests[2].url.href, 'https://i0.hdslb.com/bfs/subtitle/manual.json');
   assert.equal(requests[0].options.anonymous, false);
   assert.equal(requests[2].options.anonymous, true);
-  assert.ok(requests.every(item => item.options.timeoutMs === 8000 && item.options.retries === 1));
+  assert.ok(requests.every(item => item.options.timeoutMs === 8000 && item.options.maxAttempts === 2));
 });
 
 test('subtitle Markdown precedes the comment floor and preserves repeats and escapes formatting', async () => {
@@ -97,8 +96,8 @@ test('subtitle Markdown precedes the comment floor and preserves repeats and esc
   fixtures(api, { subtitle: body('相同台词', '相同台词', '# 标题\n<script>x</script> & **文字**') });
   const subtitles = await api.fetchVideoSubtitles(source(api));
   const result = markdown(api, subtitles);
-  assert.ok(result.indexOf('## 视频字幕正文') < result.indexOf('## 根评论'));
-  assert.ok(result.indexOf('相同台词') < result.indexOf('## 阅读说明'));
+  assert.ok(result.indexOf('## 视频字幕正文') < result.indexOf('## 评论楼层'));
+  assert.ok(result.indexOf('相同台词') < result.indexOf('## 评论楼层'));
   assert.equal(result.split('相同台词').length - 1, 2);
   assert.match(result, /\\# 标题/);
   assert.match(result, /&lt;script&gt;x&lt;\/script&gt; &amp; \\\*\\\*文字\\\*\\\*/);
@@ -153,7 +152,7 @@ test('no subtitles leave an explicit reason and retain the exported comment thre
   const requests = fixtures(api, { tracks: [track('zh-CN', '')] });
   const subtitles = await api.fetchVideoSubtitles(source(api));
   assert.equal(subtitles.status, 'unavailable');
-  assert.match(markdown(api, subtitles), /未返回可下载的字幕/);
+  assert.match(markdown(api, subtitles), /未返回可下载链接/);
   assert.match(markdown(api, subtitles), /根评论正文/);
   assert.match(markdown(api, subtitles), /回复正文/);
   assert.equal(requests.length, 3);
@@ -303,7 +302,7 @@ test('fetch subtitle timeout is reported as a transport error, and credentials a
     }, { once: true }));
   } });
   await assert.rejects(api.requestJsonWithRetry('https://i0.hdslb.com/a', undefined, {
-    timeoutMs: 5, retries: 1, anonymous: true,
+    timeoutMs: 5, maxAttempts: 1, anonymous: true,
   }), { name: 'BceTransportError', message: '网络请求超时' });
   assert.equal(credentials, 'omit');
 });
@@ -312,6 +311,7 @@ function setupFullScript(t, {
   available = true, failPlayer = false, navigate = false,
   subtitleTrack = track(), scriptCode = code,
 } = {}) {
+  const { JSDOM } = require('jsdom');
   const dom = new JSDOM('<!doctype html><title>原视频</title><body><h1>原视频</h1></body>', {
     url: 'https://www.bilibili.com/video/BV1234567890?p=2', runScripts: 'outside-only',
   });
@@ -395,7 +395,7 @@ test('full script exports P2 subtitles above the floor after a native menu click
   assert.match(setup.downloads[0].name, /原视频-rpid-1\.md$/);
   assert.match(result, /当前分 P：P2 · 第二集 · CID 200/);
   assert.match(result, /原视频第二集字幕/);
-  assert.ok(result.indexOf('原视频第二集字幕') < result.indexOf('## 根评论'));
+  assert.ok(result.indexOf('原视频第二集字幕') < result.indexOf('## 评论楼层'));
   assert.match(result, /根评论正文/);
   assert.match(result, /回复正文/);
   assert.match(setup.window.document.getElementById('bce-thread-exporter-toast').textContent, /含视频字幕/);
@@ -404,7 +404,7 @@ test('full script exports P2 subtitles above the floor after a native menu click
 test('full script still downloads comments when the video has no subtitles', async t => {
   const setup = setupFullScript(t, { available: false });
   const result = await setup.clickExport();
-  assert.match(result, /未返回可下载的字幕/);
+  assert.match(result, /未提供平台字幕轨道/);
   assert.match(result, /根评论正文/);
   assert.match(result, /回复正文/);
   assert.match(setup.window.document.getElementById('bce-thread-exporter-toast').textContent, /字幕未附上/);
@@ -473,4 +473,15 @@ test('subtitle diagnostics distinguish video metadata and player list network fa
     assert.equal(subtitles.status, 'failed');
     assert.ok(subtitles.reason.includes(`${stage}失败（api.bilibili.com）：网络请求失败`));
   }
+});
+
+test('reopening the same menu refreshes late titles and reuses the toast node', async t => {
+  const setup = setupFullScript(t);
+  await setup.clickExport();
+  const toast = setup.window.document.getElementById('bce-thread-exporter-toast');
+  setup.window.document.querySelector('h1').textContent = '晚加载的真实标题';
+  const result = await setup.clickExport();
+  assert.match(setup.downloads.at(-1).name, /^晚加载的真实标题-rpid-1\.md$/);
+  assert.match(result, /^# 晚加载的真实标题\n/);
+  assert.equal(setup.window.document.getElementById('bce-thread-exporter-toast'), toast);
 });

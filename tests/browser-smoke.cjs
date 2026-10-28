@@ -110,6 +110,25 @@ const assert = require('node:assert/strict');
 
     await page.goto('https://www.bilibili.com/video/BV1234567890?p=2');
 
+    // Privileged transport adapter: checks real metadata and GM callbacks.
+    // This is still a fixture, not a real Tampermonkey sandbox or CORS test.
+    const exporterSource = fs.readFileSync(path.join(__dirname, '..', 'bilibili-comment-thread-exporter.user.js'), 'utf8');
+    const connectDomains = Array.from(exporterSource.split('// ==/UserScript==')[0].matchAll(/^\/\/ @connect\s+(\S+)/gm), match => match[1]);
+    await page.evaluate(domains => {
+      window.GM_xmlhttpRequest = details => {
+        const host = new URL(details.url).hostname;
+        const controller = new AbortController();
+        if (!domains.some(domain => host === domain || host.endsWith(`.${domain}`))) {
+          queueMicrotask(() => details.onerror?.({ status: 0 }));
+          return { abort() { details.onabort?.(); } };
+        }
+        fetch(details.url, { credentials: details.anonymous ? 'omit' : 'include', signal: controller.signal })
+          .then(async response => details.onload?.({ status: response.status, responseText: await response.text() }))
+          .catch(error => error.name === 'AbortError' ? details.onabort?.() : details.onerror?.(error));
+        return { abort() { controller.abort(); } };
+      };
+    }, connectDomains);
+
     await page.evaluate(() => {
       document.querySelectorAll('.quality-item').forEach(el => el.addEventListener('click', () => {
         document.querySelector('.quality-item.active')?.classList.remove('active');
@@ -187,14 +206,15 @@ const assert = require('node:assert/strict');
     assert.match(downloadedMarkdown, /当前分 P：P2 · 第二集 · CID 200/);
     assert.match(downloadedMarkdown, /第二集的字幕正文第一句。/);
     assert.match(downloadedMarkdown, /第二集的字幕正文第二句。/);
-    assert.ok(downloadedMarkdown.indexOf('## 视频字幕正文') < downloadedMarkdown.indexOf('## 根评论'));
+    assert.ok(downloadedMarkdown.indexOf('## 视频字幕正文') < downloadedMarkdown.indexOf('## 评论楼层'));
     assert.doesNotMatch(downloadedMarkdown, /schema v/i);
 
     subtitleScenario = 'unavailable';
+    await page.evaluate(() => { delete window.GM_xmlhttpRequest; });
     const noSubtitleDownload = page.waitForEvent('download');
     await page.locator('bili-comment-menu .bce-menu-export-item').click();
     const withoutSubtitles = fs.readFileSync(await (await noSubtitleDownload).path(), 'utf8');
-    assert.match(withoutSubtitles, /未返回可下载的字幕/);
+    assert.match(withoutSubtitles, /未提供平台字幕轨道/);
     assert.match(withoutSubtitles, /这是一条测试根评论/);
     assert.match(withoutSubtitles, /测试回复 5/);
     assert.doesNotMatch(withoutSubtitles, /第二集的字幕正文第一句。/);

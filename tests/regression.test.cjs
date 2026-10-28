@@ -150,14 +150,14 @@ test('stable releases keep each public and migration userscript aligned', () => 
   const legacyForge = source('make-bilibili-great-again-promax');
   const exporterCode = source('bilibili-comment-thread-exporter');
 
-  for (const [code, version] of [[primaryEcho, '1.0.1'], [legacyEcho, '1.0.1'], [primaryForge, '1.0.0'], [legacyForge, '1.0.0'], [exporterCode, '1.1.1']]) {
+  for (const [code, version] of [[primaryEcho, '1.0.1'], [legacyEcho, '1.0.1'], [primaryForge, '1.0.0'], [legacyForge, '1.0.0'], [exporterCode, '1.2.0']]) {
     assert.equal(code.match(/^\/\/ @version\s+([^\s]+)$/m)?.[1], version);
   }
 
   assert.equal(legacyEcho, primaryEcho);
   assert.equal(legacyForge, primaryForge);
   assert.match(primaryForge, /version:\s*'1\.0\.0'/);
-  assert.match(exporterCode, /version:\s*"1\.1\.1"/);
+  assert.match(exporterCode, /version:\s*"1\.2\.0"/);
 });
 
 test('README declares current product versions and preserves the first stable baseline', () => {
@@ -165,7 +165,7 @@ test('README declares current product versions and preserves the first stable ba
 
   assert.match(readme, /BiliForge \*\*1\.0\.0\*\*/);
   assert.match(readme, /BiliEcho \*\*1\.0\.1\*\*/);
-  assert.match(readme, /评论楼层导出器 \*\*1\.1\.1\*\*/);
+  assert.match(readme, /评论楼层导出器 \*\*1\.2\.0\*\*/);
   assert.match(readme, /1\.0\.0 是三个脚本共同的首个正式稳定基线/);
 });
 
@@ -184,7 +184,7 @@ test('README exporter version matches the userscript header', () => {
 
 test('stable exporter keeps the event-driven architecture and no legacy scanners', () => {
   const code = source('bilibili-comment-thread-exporter');
-  assert.match(code, /@version\s+1\.1\.1/);
+  assert.match(code, /@version\s+1\.2\.0/);
   assert.doesNotMatch(code, /function\s+patchFetch\b/);
   assert.doesNotMatch(code, /function\s+patchXhr\b/);
   assert.doesNotMatch(code, /function\s+observePage\b/);
@@ -384,7 +384,7 @@ test('exporter paginates, deduplicates and flattens replies', async () => {
     seedReply: reply('3', '2'),
   });
 
-  assert.equal(result.exporter.version, '1.1.1');
+  assert.equal(result.exporter.version, '1.2.0');
   assert.equal(result.exporter.duplicateReplyCount, 1);
   assert.equal(result.exporter.complete, true);
   assert.equal(result.exporter.expectedReplyCount, 4);
@@ -487,9 +487,10 @@ test('exporter Markdown includes likes, UID, IP location and reply target', () =
   assert.match(markdown, /点赞 67/);
   assert.match(markdown, /UID 10/);
   assert.match(markdown, /IP属地：重庆/);
-  assert.match(markdown, /回复 \[0001\]\(#msg-0001\) 根用户$/m);
+  assert.match(markdown, /回复 \[0001\]\(#msg-0001\) 根用户\s*$/m);
   assert.doesNotMatch(markdown, /回复 \[0001\]\(#msg-0001\) 根用户：「根评论」/);
-  assert.match(markdown, /直接回复（1）：\[0002\]\(#msg-0002\) 回复用户/);
+  assert.match(markdown, /直接回复 1 条/);
+  assert.doesNotMatch(markdown, /children-0001/);
   assert.match(markdown, /IP属地：广东/);
   assert.doesNotMatch(markdown, /## 选中的评论/);
   assert.doesNotMatch(markdown, /schema v/i);
@@ -526,7 +527,7 @@ test('stable exporter suppresses shallow redundancy but keeps deep navigation', 
 
   const markdown = api.formatThreadMarkdown(thread);
 
-  assert.match(markdown, /回复 \[0001\]\(#msg-0001\) 用户1$/m);
+  assert.match(markdown, /回复 \[0001\]\(#msg-0001\) 用户1\s*$/m);
   assert.doesNotMatch(markdown, /回复 \[0001\]\(#msg-0001\) 用户1：「/);
 
   assert.match(markdown, /回复 \[0002\]\(#msg-0002\) 用户2：「第一层」/);
@@ -575,7 +576,7 @@ test('exporter graph keeps deep reply chains flat and precise', () => {
 
   assert.equal(graph.nodeById.get('7').depth, 6);
   assert.match(markdown, /回复 \[0006\]\(#msg-0006\) 用户6：「第五层」/);
-  assert.match(markdown, /路径：\[0001\]\(#msg-0001\) → … → \[0005\]\(#msg-0005\) → \[0006\]\(#msg-0006\) → \[0007\]\(#msg-0007\)/);
+  assert.match(markdown, /路径：\[0001\]\(#msg-0001\) → \[0002\]\(#msg-0002\) → … → \[0005\]\(#msg-0005\) → \[0006\]\(#msg-0006\) → \[0007\]\(#msg-0007\)/);
   assert.doesNotMatch(markdown, /^ {4,}/m);
 });
 
@@ -726,7 +727,7 @@ test('exporter handles a 1000-level chain with bounded breadcrumbs', () => {
   assert.equal(deepest.depth, 1000);
   assert.equal(graph.integrity.explicitResolved, 1000);
   assert.equal(graph.integrity.abnormal, 0);
-  assert.match(markdown, /路径：\[0001\]\(#msg-0001\) → … → \[0999\]\(#msg-0999\) → \[1000\]\(#msg-1000\) → \[1001\]\(#msg-1001\)/);
+  assert.match(markdown, /路径：\[0001\]\(#msg-0001\) → \[0002\]\(#msg-0002\) → … → \[0999\]\(#msg-0999\) → \[1000\]\(#msg-1000\) → \[1001\]\(#msg-1001\)/);
   assert.doesNotMatch(markdown, /^ {4,}/m);
 });
 
@@ -768,9 +769,9 @@ test('exporter keeps a 500-reply fanout bounded in the main body', () => {
 
   assert.equal(graph.childrenById.get('1').length, 500);
   assert.equal(graph.integrity.explicitResolved, 500);
-  assert.match(markdown, /直接回复（500）：/);
-  assert.match(markdown, /另有 488 条，见 \[完整索引\]\(#children-0001\)/);
-  assert.match(markdown, /### \[0001\] 的直接回复（500）/);
+  assert.match(markdown, /直接回复 500 条/);
+  assert.doesNotMatch(markdown, /children-0001|大分叉完整索引/);
+  assert.equal((markdown.match(/<a id="msg-/g) || []).length, 501);
 });
 
 test('starting a new export task cancels and aborts the previous task', () => {

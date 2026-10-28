@@ -150,14 +150,14 @@ test('stable releases keep each public and migration userscript aligned', () => 
   const legacyForge = source('make-bilibili-great-again-promax');
   const exporterCode = source('bilibili-comment-thread-exporter');
 
-  for (const [code, version] of [[primaryEcho, '1.0.1'], [legacyEcho, '1.0.1'], [primaryForge, '1.0.0'], [legacyForge, '1.0.0'], [exporterCode, '1.1.0']]) {
+  for (const [code, version] of [[primaryEcho, '1.0.1'], [legacyEcho, '1.0.1'], [primaryForge, '1.0.0'], [legacyForge, '1.0.0'], [exporterCode, '1.1.1']]) {
     assert.equal(code.match(/^\/\/ @version\s+([^\s]+)$/m)?.[1], version);
   }
 
   assert.equal(legacyEcho, primaryEcho);
   assert.equal(legacyForge, primaryForge);
   assert.match(primaryForge, /version:\s*'1\.0\.0'/);
-  assert.match(exporterCode, /version:\s*"1\.1\.0"/);
+  assert.match(exporterCode, /version:\s*"1\.1\.1"/);
 });
 
 test('README declares current product versions and preserves the first stable baseline', () => {
@@ -165,7 +165,7 @@ test('README declares current product versions and preserves the first stable ba
 
   assert.match(readme, /BiliForge \*\*1\.0\.0\*\*/);
   assert.match(readme, /BiliEcho \*\*1\.0\.1\*\*/);
-  assert.match(readme, /评论楼层导出器 \*\*1\.1\.0\*\*/);
+  assert.match(readme, /评论楼层导出器 \*\*1\.1\.1\*\*/);
   assert.match(readme, /1\.0\.0 是三个脚本共同的首个正式稳定基线/);
 });
 
@@ -184,7 +184,7 @@ test('README exporter version matches the userscript header', () => {
 
 test('stable exporter keeps the event-driven architecture and no legacy scanners', () => {
   const code = source('bilibili-comment-thread-exporter');
-  assert.match(code, /@version\s+1\.1\.0/);
+  assert.match(code, /@version\s+1\.1\.1/);
   assert.doesNotMatch(code, /function\s+patchFetch\b/);
   assert.doesNotMatch(code, /function\s+patchXhr\b/);
   assert.doesNotMatch(code, /function\s+observePage\b/);
@@ -384,7 +384,7 @@ test('exporter paginates, deduplicates and flattens replies', async () => {
     seedReply: reply('3', '2'),
   });
 
-  assert.equal(result.exporter.version, '1.1.0');
+  assert.equal(result.exporter.version, '1.1.1');
   assert.equal(result.exporter.duplicateReplyCount, 1);
   assert.equal(result.exporter.complete, true);
   assert.equal(result.exporter.expectedReplyCount, 4);

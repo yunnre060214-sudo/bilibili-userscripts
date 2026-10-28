@@ -2,7 +2,7 @@
 // @name         Bilibili Comment Thread Exporter
 // @name:zh-CN   B站评论楼层导出器
 // @namespace    https://space.bilibili.com/1937432404
-// @version      1.1.0
+// @version      1.1.1
 // @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/bilibili-comment-thread-exporter.user.js
 // @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/bilibili-comment-thread-exporter.user.js
 // @description  Download video subtitles and a complete Bilibili comment thread together as Markdown from the native three-dot menu.
@@ -10,8 +10,8 @@
 // @author       素晴
 // @match        https://www.bilibili.com/video/*
 // @connect      api.bilibili.com
-// @connect      *.bilibili.com
-// @connect      *.hdslb.com
+// @connect      bilibili.com
+// @connect      hdslb.com
 // @grant        GM_xmlhttpRequest
 // @run-at       document-start
 // @noframes
@@ -26,7 +26,7 @@
 
   const META = Object.freeze({
     id: "bce-thread-exporter",
-    version: "1.1.0",
+    version: "1.1.1",
     installGuard: "__bceCommentExporterV1Installed",
   });
 
@@ -808,7 +808,9 @@
         return { status: "unavailable", reason: "此评论区不属于普通视频，未附字幕。" };
       }
 
-      const view = await requestSubtitleJson(buildApiUrl(API.videoView, { aid: source.aid }), task);
+      const view = await requestSubtitleJson(
+        buildApiUrl(API.videoView, { aid: source.aid }), task, false, "获取视频信息"
+      );
       const video = view?.data;
       if (String(video?.aid || "") !== String(source.aid)) {
         throw new Error("视频信息与评论所属视频不一致");
@@ -834,7 +836,9 @@
       for (const endpoint of API.players) {
         throwIfCancelled(task);
         try {
-          const player = await requestSubtitleJson(buildApiUrl(endpoint, params), task);
+          const player = await requestSubtitleJson(
+            buildApiUrl(endpoint, params), task, false, "获取字幕列表"
+          );
           const subtitles = player?.data?.subtitle?.subtitles;
           if (!Array.isArray(subtitles)) throw new Error("播放器未返回字幕列表");
           gotSubtitleList = true;
@@ -863,7 +867,7 @@
       for (const track of tracks.slice(0, CONFIG.subtitleTrackLimit)) {
         throwIfCancelled(task);
         try {
-          const payload = await requestSubtitleJson(track.url, task, true);
+          const payload = await requestSubtitleJson(track.url, task, true, "下载字幕正文");
           if (!Array.isArray(payload?.body)) throw new Error("字幕正文格式异常");
           const cues = normalizeSubtitleCues(payload.body);
           if (cues.length === 0) throw new Error("字幕正文为空");
@@ -886,15 +890,25 @@
     }
   }
 
-  async function requestSubtitleJson(url, task, anonymous = false) {
+  async function requestSubtitleJson(url, task, anonymous = false, stage = "字幕请求") {
     throwIfCancelled(task);
-    const payload = await dependencies.requestJson(url, task, {
-      timeoutMs: CONFIG.subtitleRequestTimeoutMs,
-      retries: 1,
-      anonymous,
-    });
-    throwIfCancelled(task);
-    return payload;
+    try {
+      const payload = await dependencies.requestJson(url, task, {
+        timeoutMs: CONFIG.subtitleRequestTimeoutMs,
+        retries: 1,
+        anonymous,
+      });
+      throwIfCancelled(task);
+      return payload;
+    } catch (error) {
+      throwIfCancelled(task);
+      if (isCancelledError(error)) throw error;
+      // Include the stage and host, keeping signed subtitle URLs out of exports.
+      throw new BceTransportError(
+        `${stage}失败（${new URL(url).hostname}）：${error?.message || String(error)}`,
+        error?.retryable
+      );
+    }
   }
 
   function normalizeSubtitleUrl(value) {

@@ -308,7 +308,10 @@ test('fetch subtitle timeout is reported as a transport error, and credentials a
   assert.equal(credentials, 'omit');
 });
 
-function setupFullScript(t, { available = true, failPlayer = false, navigate = false } = {}) {
+function setupFullScript(t, {
+  available = true, failPlayer = false, navigate = false,
+  subtitleTrack = track(), scriptCode = code,
+} = {}) {
   const dom = new JSDOM('<!doctype html><title>原视频</title><body><h1>原视频</h1></body>', {
     url: 'https://www.bilibili.com/video/BV1234567890?p=2', runScripts: 'outside-only',
   });
@@ -317,6 +320,9 @@ function setupFullScript(t, { available = true, failPlayer = false, navigate = f
   const blobs = new Map();
   const downloads = [];
   const requests = [];
+  // Tampermonkey @connect values are domains, not @match-style *.domain patterns.
+  const connectDomains = Array.from(scriptCode.split('// ==/UserScript==')[0]
+    .matchAll(/^\/\/ @connect\s+(\S+)/gm), match => match[1]);
   window.Blob = Blob;
   window.URL.createObjectURL = blob => { const url = `blob:local/${blobs.size}`; blobs.set(url, blob); return url; };
   window.URL.revokeObjectURL = url => blobs.delete(url);
@@ -331,6 +337,10 @@ function setupFullScript(t, { available = true, failPlayer = false, navigate = f
   window.GM_xmlhttpRequest = options => {
     requests.push(options);
     const url = new URL(options.url);
+    if (!connectDomains.some(domain => domain === '*' || url.hostname === domain || url.hostname.endsWith(`.${domain}`))) {
+      queueMicrotask(() => options.onerror({ status: 0, error: 'This domain is not a part of the @connect list' }));
+      return { abort() { options.onabort(); } };
+    }
     let payload;
     if (url.pathname === '/x/v2/reply/reply') {
       payload = { code: 0, data: { root, replies: [reply], page: { count: 1 } } };
@@ -339,8 +349,8 @@ function setupFullScript(t, { available = true, failPlayer = false, navigate = f
         window.document.querySelector('h1').textContent = '新视频';
       }
     } else if (url.pathname === '/x/web-interface/view') payload = view();
-    else if (url.pathname.startsWith('/x/player/')) payload = player(available ? [track()] : []);
-    else if (url.hostname === 'i0.hdslb.com') payload = body('原视频第二集字幕');
+    else if (url.pathname.startsWith('/x/player/')) payload = player(available ? [subtitleTrack] : []);
+    else if (url.hostname === 'i0.hdslb.com' || url.hostname === 'aisubtitle.hdslb.com') payload = body('原视频第二集字幕');
     else assert.fail(`unexpected request: ${url}`);
     const status = failPlayer && url.pathname.startsWith('/x/player/') ? 403 : 200;
     queueMicrotask(() => options.onload({ status, response: payload }));
@@ -362,7 +372,7 @@ function setupFullScript(t, { available = true, failPlayer = false, navigate = f
   more.append(button, menu);
   actionRoot.append(more);
   window.document.body.append(action);
-  window.eval(code);
+  window.eval(scriptCode);
 
   return { window, downloads, requests, async clickExport() {
     const downloadCount = downloads.length;
@@ -426,4 +436,41 @@ test('reopening the same comment menu after a part change exports the newly sele
   assert.deepEqual(setup.requests.filter(item => item.url.includes('/x/player/')).map(item =>
     new URL(item.url).searchParams.get('cid')
   ), ['200', '100']);
+});
+
+test('full script permits the actual AI subtitle CDN under declared Tampermonkey domain permissions', async t => {
+  const setup = setupFullScript(t, {
+    subtitleTrack: track('ai-zh', '//aisubtitle.hdslb.com/bfs/ai_subtitle/prod/fixture?auth_key=secret'),
+  });
+  const result = await setup.clickExport();
+  assert.match(result, /原视频第二集字幕/);
+  assert.match(result, /自动生成/);
+  assert.doesNotMatch(result, /auth_key|secret|网络请求失败/);
+  const request = setup.requests.find(item => new URL(item.url).hostname === 'aisubtitle.hdslb.com');
+  assert.ok(request, 'the AI subtitle request must reach its CDN');
+  assert.equal(request.anonymous, true);
+});
+
+test('legacy wildcard grants reproduce the blocked CDN error with stage and host diagnostics', async t => {
+  const setup = setupFullScript(t, {
+    subtitleTrack: track('ai-zh', '//aisubtitle.hdslb.com/bfs/ai_subtitle/prod/fixture?auth_key=secret'),
+    scriptCode: code.replace(/^\/\/ @connect\s+hdslb\.com$/m, '// @connect *.hdslb.com'),
+  });
+  const result = await setup.clickExport();
+  assert.match(result, /下载字幕正文失败（aisubtitle\.hdslb\.com）：网络请求失败/);
+  assert.match(result, /根评论正文/);
+  assert.doesNotMatch(result, /原视频第二集字幕|auth_key|secret/);
+});
+
+test('subtitle diagnostics distinguish video metadata and player list network failures', async () => {
+  for (const [path, stage] of [
+    ['/x/web-interface/view', '获取视频信息'],
+    ['/x/player/', '获取字幕列表'],
+  ]) {
+    const { api } = load();
+    fixtures(api, { respond(url) { if (url.pathname.startsWith(path)) throw new Error('网络请求失败'); } });
+    const subtitles = await api.fetchVideoSubtitles(source(api));
+    assert.equal(subtitles.status, 'failed');
+    assert.ok(subtitles.reason.includes(`${stage}失败（api.bilibili.com）：网络请求失败`));
+  }
 });

@@ -335,7 +335,7 @@ npm run test:prophecy
 
 预言测试覆盖房间识别、短号与内嵌页面、缓存过期及容量、重试上限、在线与后台恢复、背景切换、重复点击、历史入口和路由竞态；桌面侧覆盖官方 hash 导航、无主播历史、晚加载与重复注入、导航阻止、滚动/交互/焦点恢复、容器移除和取消、SDK 及结果提示。1.3.0 另覆盖本地档案的去重、账号隔离、刷新后仍在、100 条上限时的累计起始日、档案容量、存储失败和损坏档案。
 
-当前官方 SDK 和 Vue ListItem 组件用于本地联测：当前预言、历史和独立页面的样式与事件通过，手动确认前没有 POST，确认后一次模拟 `user_join` 并刷新、显示完成提示。真实参与请求数为 0。JavaScript 语法通过。预言测试 79 项通过。jsdom 不计算实际浏览器布局；1.3.0 的累计净收益用本地夹具和 headless Chrome 截图核对，尚未在登录后的真实预言页复测。全仓为 173/174 通过，唯一失败仍是 `BiliForge live quality applies the latest visibility request during menu loading`。
+当前官方 SDK 和 Vue ListItem 组件用于本地联测：当前预言、历史和独立页面的样式与事件通过，手动确认前没有 POST，确认后一次模拟 `user_join` 并刷新、显示完成提示。真实参与请求数为 0。JavaScript 语法通过。预言测试 79 项通过。jsdom 不计算实际浏览器布局；1.3.0 的累计净收益用本地夹具和 headless Chrome 截图核对，尚未在登录后的真实预言页复测。全仓为 184/185 通过，唯一失败仍是 `BiliForge live quality applies the latest visibility request during menu loading`。
 
 1.0.0 的全仓测试为 88/89 通过，唯一失败是原有 `BiliForge live quality applies the latest visibility request during menu loading`。本次未修改该模块。
 

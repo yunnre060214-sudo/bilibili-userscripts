@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BiliEcho
 // @namespace    https://space.bilibili.com/1937432404
-// @version      1.0.0
+// @version      1.0.1
 // @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/biliecho.user.js
 // @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/biliecho.user.js
 // @description  B站评论发送后自动检查无账号可见性：正常、疑似仅自己可见、疑似秒删、可疑状态。风控响应会自动降级，不误判评论状态。支持设置、取消队列、透明报告和无限次重新检测。无 AI、无 API Key。
@@ -38,14 +38,18 @@
   });
 
   const RISK_CONTROL_CODES = new Set([-509, -412, -352]);
-  const RISK_CONTROL_RETRY_DELAY_MS = 1800;
+  const MIN_REQUEST_INTERVAL_MS = 1000;
+  const GUEST_RISK_KEY = 'bfc-guest-risk-v1';
+  const GUEST_RISK_BASE_MS = 60000;
+  const GUEST_RISK_MAX_MS = 300000;
+  const MAX_SERVER_COOLDOWN_MS = 3600000;
 
   const SETTINGS_KEY = 'bfc-pro-settings-v42';
   const DEFAULT_SETTINGS = Object.freeze({
     waitAfterPostMs: 6500,
     requestTimeoutMs: 10000,
     maxReplyPages: 18,
-    pageDelayMs: 160,
+    pageDelayMs: 1000,
     retryCheckDelaysText: '20000,45000',
     recheckCooldownMs: 30000,
     autoRetry: true,
@@ -66,6 +70,9 @@
     activeToken: null,
     diagnostics: null,
     riskControlRecheckAt: new Map(),
+    requestTurn: Promise.resolve(),
+    nextRequestAt: 0,
+    guestRisk: { until: 0, at: 0, strikes: 0, code: -352 },
   };
 
   let SETTINGS = loadSettings();
@@ -106,7 +113,7 @@
       waitAfterPostMs: clampNumber(raw.waitAfterPostMs, DEFAULT_SETTINGS.waitAfterPostMs, 1000, 120000),
       requestTimeoutMs: clampNumber(raw.requestTimeoutMs, DEFAULT_SETTINGS.requestTimeoutMs, 3000, 60000),
       maxReplyPages: clampNumber(raw.maxReplyPages, DEFAULT_SETTINGS.maxReplyPages, 1, 80),
-      pageDelayMs: clampNumber(raw.pageDelayMs, DEFAULT_SETTINGS.pageDelayMs, 0, 3000),
+      pageDelayMs: clampNumber(raw.pageDelayMs, DEFAULT_SETTINGS.pageDelayMs, MIN_REQUEST_INTERVAL_MS, 3000),
       retryCheckDelaysText,
       recheckCooldownMs: clampNumber(raw.recheckCooldownMs, DEFAULT_SETTINGS.recheckCooldownMs, 5000, 120000),
       autoRetry: raw.autoRetry !== false,
@@ -147,6 +154,7 @@
       buvidFallbackUsed: false,
       pureAnonymousSucceeded: false,
       loginRequests: 0,
+      suppressedRequests: 0,
       finalKind: '',
       cancelled: false,
     };
@@ -244,12 +252,69 @@
   }
 
   function getBuvid3Cookie() {
-    const match = document.cookie.match(/(?:^|;\s*)buvid3=([^;]+)/);
-    return match ? `buvid3=${match[1]}` : '';
+    try {
+      const match = String(document.cookie || '').match(/(?:^|;\s*)buvid3=([^;\s]+)/);
+      return match ? `buvid3=${match[1]}` : '';
+    } catch {
+      return '';
+    }
   }
 
   function now() {
     return Date.now();
+  }
+
+  function getGuestCooldownRemaining() {
+    try {
+      const stored = safeJsonParse(localStorage.getItem(GUEST_RISK_KEY) || '');
+      if (stored && Number.isFinite(stored.until) && Number.isFinite(stored.at)
+        && stored.at <= now() && stored.until <= now() + MAX_SERVER_COOLDOWN_MS
+        && RISK_CONTROL_CODES.has(Number(stored.code)) && stored.until >= STATE.guestRisk.until) {
+        STATE.guestRisk = {
+          until: stored.until,
+          at: stored.at,
+          strikes: clampNumber(stored.strikes, 1, 1, 10),
+          code: Number(stored.code),
+        };
+      }
+    } catch {
+      // The in-memory cooldown still works if browser storage is unavailable.
+    }
+    return Math.max(0, STATE.guestRisk.until - now());
+  }
+
+  function noteGuestRisk(response, retryAfterMs = 0) {
+    getGuestCooldownRemaining();
+    const previous = STATE.guestRisk;
+    const strikes = now() - previous.at < 600000 ? Math.min(previous.strikes + 1, 10) : 1;
+    const delayMs = Math.max(
+      Math.min(GUEST_RISK_BASE_MS * 2 ** (strikes - 1), GUEST_RISK_MAX_MS),
+      clampNumber(retryAfterMs, 0, 0, MAX_SERVER_COOLDOWN_MS),
+    );
+    STATE.guestRisk = { until: now() + delayMs, at: now(), strikes, code: Number(response.code) };
+    try {
+      localStorage.setItem(GUEST_RISK_KEY, JSON.stringify(STATE.guestRisk));
+    } catch {
+      // Do not require storage permissions to enforce the current page's cooldown.
+    }
+  }
+
+  function clearGuestRisk(requestStartedAt) {
+    getGuestCooldownRemaining();
+    if (STATE.guestRisk.at > requestStartedAt) return;
+    STATE.guestRisk = { until: 0, at: 0, strikes: 0, code: -352 };
+    try {
+      localStorage.removeItem(GUEST_RISK_KEY);
+    } catch {
+      // Ignore storage failures.
+    }
+  }
+
+  function guestCooldownResponse() {
+    const remaining = getGuestCooldownRemaining();
+    if (!remaining) return null;
+    if (STATE.diagnostics) STATE.diagnostics.suppressedRequests += 1;
+    return { code: STATE.guestRisk.code, message: '游客查询冷却中', cooldownMs: remaining };
   }
 
   function isDuplicateRpid(rpid) {
@@ -271,14 +336,15 @@
   }
 
   function getRiskControlCooldownRemaining(reply) {
-    if (!reply?.rpid) return 0;
+    const guestRemaining = getGuestCooldownRemaining();
+    if (!reply?.rpid) return guestRemaining;
     const key = String(reply.rpid);
     const remaining = (STATE.riskControlRecheckAt.get(key) || 0) - now();
     if (remaining <= 0) {
       STATE.riskControlRecheckAt.delete(key);
-      return 0;
+      return guestRemaining;
     }
-    return remaining;
+    return Math.max(remaining, guestRemaining);
   }
 
   function createElement(tagName, options = {}) {
@@ -325,7 +391,7 @@
             createSettingsField('首次等待（秒）', 'bfc-lite-setting-wait', { type: 'number', min: '1', max: '120', step: '1' }),
             createSettingsField('请求超时（秒）', 'bfc-lite-setting-timeout', { type: 'number', min: '3', max: '60', step: '1' }),
             createSettingsField('楼中楼页数', 'bfc-lite-setting-pages', { type: 'number', min: '1', max: '80', step: '1' }),
-            createSettingsField('翻页间隔（毫秒）', 'bfc-lite-setting-page-delay', { type: 'number', min: '0', max: '3000', step: '20' }),
+            createSettingsField('请求间隔（毫秒）', 'bfc-lite-setting-page-delay', { type: 'number', min: '1000', max: '3000', step: '100' }),
             createSettingsField('复检延迟（毫秒，逗号分隔）', 'bfc-lite-setting-retries', { type: 'text' }),
           ],
         }),
@@ -937,6 +1003,23 @@
     return (typeof GM !== 'undefined' && typeof GM.xmlHttpRequest === 'function') || typeof GM_xmlhttpRequest === 'function';
   }
 
+  function createHttpError(status, text, retryAfter = '') {
+    const error = new Error(`HTTP ${status}: ${compactText(text, 300)}`);
+    error.httpStatus = Number(status);
+    const body = safeJsonParse(text);
+    error.riskCode = isRiskControlResponse(body) ? Number(body.code) : 0;
+    const value = String(retryAfter || '').trim();
+    const seconds = value ? Number(value) : NaN;
+    const delay = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(value) - now();
+    error.retryAfterMs = clampNumber(delay, 0, 0, MAX_SERVER_COOLDOWN_MS);
+    return error;
+  }
+
+  function riskResponseFromError(error) {
+    const code = error.riskCode || ({ 403: -352, 412: -412, 429: -509 })[error.httpStatus];
+    return code ? { code, message: `评论查询受限（HTTP ${error.httpStatus}）` } : null;
+  }
+
   function gmRequestText(url, { anonymous = true, includeBuvidCookie = false } = {}) {
     return new Promise((resolve, reject) => {
       const fn = typeof GM !== 'undefined' && typeof GM.xmlHttpRequest === 'function'
@@ -952,27 +1035,37 @@
 
       const headers = {
         Accept: 'application/json, text/plain, */*',
+        Referer: 'https://www.bilibili.com/',
       };
 
       const buvid3 = getBuvid3Cookie();
       if (includeBuvidCookie && buvid3) headers.Cookie = buvid3;
 
       let settled = false;
+      let requestHandle;
+      let timer;
       const settleResolve = (res) => {
         if (settled) return;
         settled = true;
+        clearTimeout(timer);
         const status = Number(res.status || 0);
         if (status >= 200 && status < 300) resolve(res.responseText || '');
-        else reject(new Error(`HTTP ${status}: ${res.responseText || ''}`));
+        else reject(createHttpError(status, res.responseText || '', String(res.responseHeaders || '').match(/^retry-after:\s*(.+)$/im)?.[1]));
       };
       const settleReject = (error) => {
         if (settled) return;
         settled = true;
+        clearTimeout(timer);
         reject(error instanceof Error ? error : new Error(stringifyForUser(error)));
       };
 
+      timer = setTimeout(() => {
+        settleReject(new Error('请求超时'));
+        try { requestHandle?.abort?.(); } catch { /* Already settled. */ }
+      }, SETTINGS.requestTimeoutMs);
+
       try {
-        const ret = fn({
+        requestHandle = fn({
           method: 'GET',
           url,
           headers,
@@ -981,10 +1074,11 @@
           onload: settleResolve,
           onerror: settleReject,
           ontimeout: () => settleReject(new Error('请求超时')),
+          onabort: () => settleReject(new Error('请求已中止')),
         });
 
-        if (ret && typeof ret.then === 'function') {
-          ret.then(settleResolve).catch(settleReject);
+        if (requestHandle && typeof requestHandle.then === 'function') {
+          requestHandle.then(settleResolve).catch(settleReject);
         }
       } catch (error) {
         settleReject(error);
@@ -1009,7 +1103,7 @@
       });
 
       const text = await response.text();
-      if (!response.ok) throw new Error(`HTTP ${response.status}: ${text}`);
+      if (!response.ok) throw createHttpError(response.status, text, response.headers?.get?.('Retry-After'));
       return text;
     } finally {
       clearTimeout(timer);
@@ -1031,66 +1125,81 @@
       error: riskControlled ? `B站风控 code ${json.code}` : undefined,
     });
     if (login && STATE.diagnostics) STATE.diagnostics.loginRequests += 1;
+    if (!login && isSuccess(json) && STATE.diagnostics) STATE.diagnostics.pureAnonymousSucceeded = true;
     return json;
   }
 
-  async function requestJsonByGm(url) {
-    const text = await gmRequestText(url, { anonymous: true, includeBuvidCookie: false });
+  async function requestJsonByGm(url, { includeBuvidCookie = false } = {}) {
+    const withBuvid = includeBuvidCookie && Boolean(getBuvid3Cookie());
+    if (withBuvid && STATE.diagnostics) STATE.diagnostics.buvidFallbackUsed = true;
+    const text = await gmRequestText(url, { anonymous: true, includeBuvidCookie: withBuvid });
     const json = safeJsonParse(text);
     if (!json) throw new Error(`JSON 解析失败：${compactText(text, 300)}`);
 
     const riskControlled = isRiskControlResponse(json);
     recordRequestAttempt({
-      mode: 'GM 匿名回退',
+      mode: withBuvid ? 'GM 游客（仅 buvid3）' : 'GM 纯匿名',
       login: false,
       ok: !riskControlled,
       riskControlled,
       url,
       error: riskControlled ? `B站风控 code ${json.code}` : undefined,
     });
-    if (!riskControlled && STATE.diagnostics) STATE.diagnostics.pureAnonymousSucceeded = true;
+    if (!withBuvid && isSuccess(json) && STATE.diagnostics) STATE.diagnostics.pureAnonymousSucceeded = true;
     return json;
   }
 
   async function requestJson(url, { login = false, token } = {}) {
     checkCancelled(token);
-    const errors = [];
-    let riskControlResponse = null;
-
+    const previousTurn = STATE.requestTurn;
+    let release;
+    STATE.requestTurn = new Promise(resolve => { release = resolve; });
     try {
-      const json = await requestJsonByFetch(url, { login });
+      await previousTurn;
       checkCancelled(token);
-      if (!isRiskControlResponse(json)) return json;
-      riskControlResponse = json;
-    } catch (error) {
-      checkCancelled(token);
-      if (isCancelledError(error)) throw error;
-      recordRequestAttempt({ mode: login ? '页面 fetch 登录态' : '页面 fetch 游客', login, ok: false, url, error: error.message });
-      errors.push(`页面 fetch ${login ? '登录' : '游客'}请求失败：${error.message}`);
-    }
+      const useBuvid = !login && canUseGmXhr() && Boolean(getBuvid3Cookie());
+      const fetchAttempt = { mode: login ? '页面 fetch 登录态' : '页面 fetch 游客', run: () => requestJsonByFetch(url, { login }) };
+      const gmAttempt = { mode: useBuvid ? 'GM 游客（仅 buvid3）' : 'GM 纯匿名', run: () => requestJsonByGm(url, { includeBuvidCookie: useBuvid }) };
+      const attempts = useBuvid ? [gmAttempt, fetchAttempt] : [fetchAttempt, ...(!login && canUseGmXhr() ? [gmAttempt] : [])];
+      const errors = [];
 
-    checkCancelled(token);
-    if (!login && canUseGmXhr()) {
-      if (riskControlResponse) {
-        await sleepWithCancel(RISK_CONTROL_RETRY_DELAY_MS, token);
+      for (const attempt of attempts) {
+        checkCancelled(token);
+        if (!login) {
+          const cooling = guestCooldownResponse();
+          if (cooling) return cooling;
+        }
+        await sleepWithCancel(Math.max(0, STATE.nextRequestAt - now()), token);
+        checkCancelled(token);
+        if (!login) {
+          const cooling = guestCooldownResponse();
+          if (cooling) return cooling;
+        }
+        const startedAt = now();
+        try {
+          const json = await attempt.run();
+          checkCancelled(token);
+          if (!login && isRiskControlResponse(json)) noteGuestRisk(json);
+          else if (!login && isSuccess(json)) clearGuestRisk(startedAt);
+          return json;
+        } catch (error) {
+          checkCancelled(token);
+          if (isCancelledError(error)) throw error;
+          const risk = riskResponseFromError(error);
+          recordRequestAttempt({ mode: attempt.mode, login, ok: false, riskControlled: Boolean(risk), url, error: error.message });
+          if (risk) {
+            if (!login) noteGuestRisk(risk, error.retryAfterMs);
+            return risk;
+          }
+          errors.push(`${attempt.mode}请求失败：${error.message}`);
+        } finally {
+          STATE.nextRequestAt = now() + Math.max(MIN_REQUEST_INTERVAL_MS, SETTINGS.pageDelayMs);
+        }
       }
-
-      try {
-        checkCancelled(token);
-        const json = await requestJsonByGm(url);
-        checkCancelled(token);
-        if (!isRiskControlResponse(json)) return json;
-        riskControlResponse = json;
-      } catch (error) {
-        checkCancelled(token);
-        if (isCancelledError(error)) throw error;
-        recordRequestAttempt({ mode: 'GM 匿名回退', login: false, ok: false, url, error: error.message });
-        errors.push(`GM 匿名回退请求失败：${error.message}`);
-      }
+      throw new Error(errors.join('\n'));
+    } finally {
+      release();
     }
-
-    if (riskControlResponse) return riskControlResponse;
-    throw new Error(errors.join('\n'));
   }
 
   function buildUrl(path, params) {
@@ -1189,7 +1298,9 @@
       `请求尝试：${requestCount} 次，失败 ${failedCount} 次`,
       `请求方式：${modes}`,
       `纯匿名命中：${diagnostics.pureAnonymousSucceeded ? '是' : '否'}`,
-      `buvid3 辅助回退：${diagnostics.buvidFallbackUsed ? '是' : '否'}`,
+      `buvid3 游客辅助：${diagnostics.buvidFallbackUsed ? '是' : '否'}`,
+      `冷却期间跳过请求：${diagnostics.suppressedRequests} 次`,
+      `游客查询冷却：${Math.ceil(getGuestCooldownRemaining() / 1000)} 秒`,
       `登录态请求：${diagnostics.loginRequests} 次`,
       `延迟复检：${diagnostics.retries} 次`,
       `自动复检：${SETTINGS.autoRetry ? '开启' : '关闭'}`,
@@ -1225,18 +1336,20 @@
   }
 
   function makeRiskControlUnavailableResult(steps) {
-    steps.push('游客评论接口被 B 站临时风控拦截，无法取得可用于判断的评论数据。');
+    const seconds = Math.ceil(getGuestCooldownRemaining() / 1000);
+    steps.push('评论接口查询受限，无法取得可用于判断的评论数据。');
     return {
       kind: 'unavailable',
       title: '暂时无法检测',
-      status: 'B 站暂时拒绝游客查询，常见于请求频率较高或游客校验未通过。\n\n本次无法判断评论状态；这不代表评论被删除或仅自己可见。请等待片刻后重新检测。',
+      status: `B 站暂时拒绝评论查询，常见于请求频率较高或游客校验未通过。\n\n本次无法判断评论状态；这不代表评论被删除或仅自己可见。${seconds ? `请 ${seconds} 秒后重新检测。` : '请等待片刻后重新检测。'}`,
       tone: 'info',
-      extra: '接口返回了 B 站风控响应。脚本已完成一次温和回退，未继续高频请求。',
+      extra: '接口返回了 B 站风控响应或当前仍处于冷却期。脚本已暂停查询，避免连续重试加重拦截。',
     };
   }
 
   async function runVisibilityProbe(reply, steps, token) {
     checkCancelled(token);
+    if (guestCooldownResponse()) return makeRiskControlUnavailableResult(steps);
     const root = Number(reply.root || 0);
     return root === 0
       ? await detectRootComment(reply, steps, token)
@@ -1269,6 +1382,10 @@
       if (STATE.diagnostics) STATE.diagnostics.retries += 1;
       latestResult = await runVisibilityProbe(reply, steps, token);
 
+      if (latestResult.kind === 'unavailable') {
+        return { ...latestResult, confirmedAfterRetry: false };
+      }
+
       if (latestResult.kind === 'ok') {
         return {
           ...latestResult,
@@ -1280,9 +1397,11 @@
 
     return {
       ...latestResult,
-      confirmedAfterRetry: true,
+      confirmedAfterRetry: retryCheckDelaysMs.length > 0 && latestResult.kind === initialResult.kind,
       extra: retryCheckDelaysMs.length > 0
-        ? `异常或可疑状态已经过 ${retryCheckDelaysMs.length} 次延迟复检确认。`
+        ? latestResult.kind === initialResult.kind
+          ? `异常或可疑状态已经过 ${retryCheckDelaysMs.length} 次延迟复检确认。`
+          : `已进行 ${retryCheckDelaysMs.length} 次延迟复检，结论发生变化，本次报告最新结果。`
         : '自动延迟复检已关闭，本次只报告即时检测结果。',
     };
   }
@@ -1697,6 +1816,7 @@
           lastReply: STATE.lastReply,
           lastReport: STATE.lastReport,
           settings: { ...SETTINGS },
+          guestCooldownMs: getGuestCooldownRemaining(),
           diagnostics: STATE.diagnostics ? JSON.parse(JSON.stringify(STATE.diagnostics)) : null,
         };
       },

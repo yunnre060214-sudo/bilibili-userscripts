@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         B站直播预言
 // @namespace    https://space.bilibili.com/1937432404
-// @version      1.2.0
-// @description  在弹幕输入框上方添加简约预言图标，独立打开官方预言与参与历史；新标签页标出最新预言，并分开显示今天和历史以来的硬币净收益。
+// @version      1.3.0
+// @description  在弹幕输入框上方添加简约预言图标，独立打开官方预言与参与历史；新标签页标出最新预言，并按今天和本机累计的历史显示硬币净收益。
 // @author       素晴
 // @homepageURL  https://github.com/yunnre060214-sudo/bilibili-userscripts
 // @supportURL   https://github.com/yunnre060214-sudo/bilibili-userscripts/issues
@@ -10,6 +10,8 @@
 // @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/bilibili-live-prophecy.user.js
 // @match        https://live.bilibili.com/*
 // @run-at       document-start
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @grant        GM_registerMenuCommand
 // @grant        unsafeWindow
 // ==/UserScript==
@@ -17,7 +19,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.2.0';
+  const VERSION = '1.3.0';
 
   // The official H5 can read account data on desktop, but showConfirm/showToast
   // invoke an App bridge without a WEB/PC_ROOM fallback. Adapt only the UI SDK;
@@ -85,7 +87,7 @@
     let eventsBound = false;
     let accountSDK = null;
     let historyTask = null;
-    let ledger = { status: 'idle', uid: '', records: [], limited: false, fetchedAt: 0, signature: '', day: '', error: '' };
+    let ledger = { status: 'idle', uid: '', records: [], limited: false, archived: false, complete: false, startedAt: 0, fetchedAt: 0, signature: '', day: '', error: '' };
 
     function ensureRoot() {
       if (shadow?.host.isConnected) return shadow;
@@ -368,6 +370,9 @@
     const HISTORY_PAGE_GAP = 400;
     const HISTORY_RETRY_GAP = 800;
     const HISTORY_CACHE_MS = 180000;
+    const ARCHIVE_KEY = 'bili-prophecy-archive-v1';
+    const ARCHIVE_VERSION = 1;
+    const ARCHIVE_MAX = 2000;
 
     function integerCoin(value) {
       if (typeof value === 'number' && Number.isSafeInteger(value)) return value;
@@ -406,21 +411,157 @@
         settled,
         change: settled ? change : null,
         publishedMs: Number.isFinite(publish) && publish > 0 ? publish * 1000 : null,
+        title: typeof prophet.question?.question === 'string' ? prophet.question.question : '',
+        anchor: typeof item?.anchor_name === 'string' ? item.anchor_name : '',
       };
+    }
+
+    function cardTitle(card) {
+      const title = card.querySelector(':scope .title');
+      if (!title) return '';
+      return [...title.childNodes].filter(node => !node.classList?.contains('bili-prophecy-new')).map(node => node.textContent || '').join('').trim();
     }
 
     function domRecords() {
       const { mode, cards } = predictionCards();
       if (!cards.length) return null;
       return {
-        records: cards.map((card, index) => {
+        records: cards.map(card => {
           const change = mode === 'history' ? historyCoin(card) : settledCoin(card).change;
           const value = change.kind === 'value' ? change.value : null;
-          return { id: `dom-${index}`, settled: value !== null, change: value, publishedMs: publishedAt(cardStatus(card)) };
+          return {
+            id: '',
+            settled: value !== null,
+            change: value,
+            publishedMs: publishedAt(cardStatus(card)),
+            title: cardTitle(card),
+            anchor: card.querySelector(':scope .line.mt8 .text-content')?.textContent?.trim() || '',
+          };
         }),
         limited: true,
         page: true,
       };
+    }
+
+    function formatDay(ms) {
+      const date = new Date(ms);
+      const pad = number => String(number).padStart(2, '0');
+      return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+    }
+
+    function recordKey(record) {
+      if (record.id && !String(record.id).startsWith('fp:')) return String(record.id);
+      if (record.publishedMs == null || record.change == null) return '';
+      return `fp:${record.publishedMs}:${record.change}:${record.title || ''}:${record.anchor || ''}`;
+    }
+
+    function sameMoment(left, right) {
+      return left.publishedMs === right.publishedMs && left.change === right.change && (left.title || '') === (right.title || '') && (left.anchor || '') === (right.anchor || '');
+    }
+
+    function readStorage(key) {
+      try {
+        if (typeof GM_getValue === 'function') return GM_getValue(key, null);
+      } catch { /* Storage can throw when the userscript manager blocks it. */ }
+      try { return page.localStorage.getItem(key); } catch { return null; }
+    }
+
+    function writeStorage(key, value) {
+      try {
+        if (typeof GM_setValue === 'function') {
+          GM_setValue(key, value);
+          return true;
+        }
+      } catch { /* Try the page store below. */ }
+      try {
+        page.localStorage.setItem(key, value);
+        return true;
+      } catch { return false; }
+    }
+
+    function emptyArchive() {
+      return { version: ARCHIVE_VERSION, users: {} };
+    }
+
+    function sanitizeArchive(data) {
+      if (!data || data.version !== ARCHIVE_VERSION || !data.users || typeof data.users !== 'object') return emptyArchive();
+      const users = {};
+      for (const [uid, user] of Object.entries(data.users)) {
+        if (!positiveId(uid) || !user || typeof user.records !== 'object' || user.records === null) continue;
+        const records = {};
+        for (const [id, record] of Object.entries(user.records)) {
+          const change = integerCoin(record?.change);
+          if (!id || change === null) continue;
+          const publishedMs = Number(record.publishedMs);
+          records[id] = {
+            id,
+            change,
+            publishedMs: Number.isFinite(publishedMs) && publishedMs > 0 ? publishedMs : null,
+            title: typeof record.title === 'string' ? record.title.slice(0, 80) : '',
+            anchor: typeof record.anchor === 'string' ? record.anchor.slice(0, 40) : '',
+          };
+        }
+        users[uid] = {
+          startedAt: Number.isFinite(Number(user.startedAt)) ? Number(user.startedAt) : Date.now(),
+          complete: user.complete === true,
+          records,
+        };
+      }
+      return { version: ARCHIVE_VERSION, users };
+    }
+
+    function readArchive() {
+      const raw = readStorage(ARCHIVE_KEY);
+      if (raw == null || raw === '') return emptyArchive();
+      try {
+        return sanitizeArchive(typeof raw === 'string' ? JSON.parse(raw) : raw);
+      } catch {
+        return emptyArchive();
+      }
+    }
+
+    function archiveRecords(user) {
+      return Object.values(user.records).map(record => ({ ...record, settled: true }));
+    }
+
+    function trimArchive(user) {
+      const entries = Object.entries(user.records);
+      if (entries.length <= ARCHIVE_MAX) return;
+      entries.sort((left, right) => (left[1].publishedMs || 0) - (right[1].publishedMs || 0));
+      for (const [id] of entries.slice(0, entries.length - ARCHIVE_MAX)) delete user.records[id];
+      user.complete = false;
+    }
+
+    function mergeArchive(uid, incoming, { authoritative, limited }) {
+      if (!positiveId(uid)) return null;
+      const data = readArchive();
+      if (!data.users[uid]) data.users[uid] = { startedAt: Date.now(), complete: Boolean(authoritative && !limited), records: {} };
+      const user = data.users[uid];
+      if (limited) user.complete = false;
+      for (const record of incoming) {
+        if (!record?.settled || record.change == null) continue;
+        const key = recordKey(record);
+        if (!key) continue;
+        if (key.startsWith('fp:')) {
+          const saved = Object.values(user.records).some(existing => !String(existing.id).startsWith('fp:') && sameMoment(existing, record));
+          if (saved) continue;
+        } else {
+          for (const [id, existing] of Object.entries(user.records)) {
+            if (id.startsWith('fp:') && sameMoment(existing, record)) delete user.records[id];
+          }
+        }
+        const previous = user.records[key];
+        user.records[key] = {
+          id: key,
+          change: record.change,
+          publishedMs: record.publishedMs ?? previous?.publishedMs ?? null,
+          title: (record.title || previous?.title || '').slice(0, 80),
+          anchor: (record.anchor || previous?.anchor || '').slice(0, 40),
+        };
+      }
+      trimArchive(user);
+      if (!writeStorage(ARCHIVE_KEY, JSON.stringify(data))) return null;
+      return { records: archiveRecords(user), complete: user.complete, startedAt: user.startedAt };
     }
 
     function settlementSignature() {
@@ -513,17 +654,40 @@
       });
     }
 
+    function pageSettledRecords() {
+      return (domRecords()?.records || []).filter(record => record.settled && record.publishedMs != null);
+    }
+
+    function applyArchive(uid, incoming, options, previous, signature, day, status, error) {
+      const archived = mergeArchive(uid, incoming, options);
+      if (!archived) return false;
+      ledger = {
+        status, uid, records: archived.records, archived: true, complete: archived.complete,
+        limited: !archived.complete, startedAt: archived.startedAt, fetchedAt: Date.now(), signature, day, error,
+      };
+      return true;
+    }
+
     async function refreshHistory(signature, day, previous) {
       if (previous.status !== 'ready') ledger = { ...previous, status: 'loading', error: '' };
+      let uid = '';
       try {
         const info = await accountSDK.getUserInfo();
-        const uid = positiveId(info?.uid ?? info?.mid);
+        uid = positiveId(info?.uid ?? info?.mid) || '';
         if (!uid) throw new Error('history unsigned');
         const loaded = await fetchAllHistory(uid);
-        ledger = { status: 'ready', uid, records: loaded.records, limited: loaded.limited, fetchedAt: Date.now(), signature, day, error: '' };
+        const archived = applyArchive(uid, [...loaded.records, ...pageSettledRecords()], { authoritative: true, limited: loaded.limited }, previous, signature, day, 'ready', '');
+        if (!archived) {
+          ledger = { status: 'ready', uid, records: loaded.records, archived: false, complete: !loaded.limited, limited: loaded.limited, startedAt: 0, fetchedAt: Date.now(), signature, day, error: '' };
+        }
       } catch (error) {
         if (error?.message === 'stopped') return;
-        ledger = { ...previous, status: 'error', fetchedAt: Date.now(), signature, day, error: '暂时无法读取参与记录。' };
+        const message = '暂时无法读取参与记录。';
+        const archived = uid ? applyArchive(uid, pageSettledRecords(), { authoritative: false, limited: true }, previous, signature, day, 'error', message) : false;
+        if (!archived) {
+          const sameUser = previous.uid === uid && uid;
+          ledger = { ...previous, status: 'error', uid, records: sameUser ? previous.records : [], archived: sameUser ? previous.archived : false, fetchedAt: Date.now(), signature, day, error: message };
+        }
       }
       if (observing) annotatePredictions();
     }
@@ -538,16 +702,25 @@
 
     function ledgerView() {
       const pageView = domRecords();
-      if (ledger.status === 'ready' || (ledger.status === 'loading' && ledger.records.length)) {
+      const showSaved = ledger.status === 'ready' || (ledger.records.length > 0 && (ledger.status === 'loading' || (ledger.status === 'error' && ledger.archived)));
+      if (showSaved) {
         const today = sumCoins(ledger.records, record => record.settled && isSettledToday(record.publishedMs));
         const all = sumCoins(ledger.records, record => record.settled);
+        const counted = ledger.records.filter(record => record.settled).length;
+        const since = formatDay(ledger.startedAt || Date.now());
         const note = [
           today.kind === 'empty' ? '今天还没有已结算的参与。' : '',
           all.kind === 'empty' ? '没有已结算的硬币变化，未结算和未参与不计入。' : '',
-          ledger.limited ? `官方接口最多返回 ${HISTORY_KNOWN_CAP} 条，更早的记录无法合计。` : `历史以来已包含接口返回的全部 ${ledger.records.length} 条。`,
+          ledger.archived
+            ? (ledger.complete ? `已累计全部 ${counted} 条已结算记录。` : `从 ${since} 起在本机累计，更早没读到的记录不在合计里。`)
+            : (ledger.limited ? `官方接口最多返回 ${HISTORY_KNOWN_CAP} 条，更早的记录无法合计。` : `历史以来已包含接口返回的全部 ${ledger.records.length} 条。`),
+          ledger.status === 'error' ? '这次没能更新接口，显示的是本机已保存的记录。' : '',
           ledger.status === 'loading' ? '正在更新…' : '',
         ].filter(Boolean).join('');
-        return { today, all, historyLabel: ledger.limited ? `历史以来（近 ${ledger.records.length} 条）` : '历史以来', note };
+        const historyLabel = ledger.archived && !ledger.complete
+          ? `历史以来（自 ${since} 起累计）`
+          : (ledger.archived || !ledger.limited ? '历史以来' : `历史以来（近 ${ledger.records.length} 条）`);
+        return { today, all, historyLabel, note };
       }
       if ((ledger.status === 'error' || typeof accountSDK?.getUserInfo !== 'function') && pageView) {
         const settled = pageView.records.filter(record => record.settled);

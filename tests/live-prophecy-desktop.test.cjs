@@ -25,7 +25,7 @@ function installRuntime(window, sdk) {
   return require;
 }
 
-function setup(t, { mobile = false, existing = false, cached = false, workspace = false, url = 'https://live.bilibili.com/p/html/live-app-guessing-game/index.html?anchorId=353609978#/' } = {}) {
+function setup(t, { mobile = false, existing = false, cached = false, workspace = false, prepare, url = 'https://live.bilibili.com/p/html/live-app-guessing-game/index.html?anchorId=353609978#/' } = {}) {
   const dom = new JSDOM(`<!doctype html><html><body><main id="app">${workspace ? '<div class="user-detail-content"><button id="return-focus">选项</button></div>' : '官方组件 fixture'}</main></body></html>`, {
     url, runScripts: 'outside-only', pretendToBeVisual: true,
   });
@@ -50,6 +50,7 @@ function setup(t, { mobile = false, existing = false, cached = false, workspace 
   const chunk = [[504], { 1171(module, exports) { exports.Ay = sdk; } }];
   window.webpackChunkguessing_game = existing ? [chunk] : [];
   if (cached) installRuntime(window, sdk)(1171);
+  prepare?.(window);
   window.eval(source);
   const execute = record => {
     const exports = {};
@@ -435,12 +436,14 @@ function summaryOf(app) {
   return { summary, note: summary.querySelector('.bili-prophecy-summary-note').textContent, today: stat('today'), all: stat('all') };
 }
 
-test('prophecy 1.2.0 is the version declared to users', () => {
-  assert.equal(source.match(/^\/\/ @version\s+(\S+)/m)[1], '1.2.0');
-  assert.match(source, /const VERSION = '1\.2\.0'/);
+test('prophecy 1.3.0 is the version declared to users', () => {
+  assert.equal(source.match(/^\/\/ @version\s+(\S+)/m)[1], '1.3.0');
+  assert.match(source, /const VERSION = '1\.3\.0'/);
+  assert.match(source, /@grant\s+GM_getValue/);
+  assert.match(source, /@grant\s+GM_setValue/);
   const readme = fs.readFileSync(path.join(__dirname, '..', 'README.md'), 'utf8');
-  assert.match(readme, /^## B站直播预言 1\.2\.0$/m);
-  assert.match(readme, /安装 B站直播预言 1\.2\.0/);
+  assert.match(readme, /^## B站直播预言 1\.3\.0$/m);
+  assert.match(readme, /安装 B站直播预言 1\.3\.0/);
 });
 
 test('history lays out the newest prediction and sums settled coin changes', async t => {
@@ -624,7 +627,7 @@ test('today uses the local midnight boundary and ignores unsettled rows', async 
   assert.equal(net.today.sign, 'plus');
   assert.equal(net.all.value, '+16 硬币');
   assert.equal(net.all.kicker, '历史以来');
-  assert.match(net.note, /全部 7 条/);
+  assert.match(net.note, /已累计全部 4 条已结算记录/);
   assert.equal(calls, 1);
 });
 
@@ -670,9 +673,12 @@ test('a 100-row history response is labeled as a partial all-time total', async 
   let calls = 0;
   const app = await showFetched(t, async () => { calls += 1; return jsonPage(records); });
   await waitFor(() => summaryOf(app).all.value === '+100 硬币');
-  assert.equal(summaryOf(app).all.kicker, '历史以来（近 100 条）');
+  const started = new Date();
+  const pad = number => String(number).padStart(2, '0');
+  const expected = `历史以来（自 ${started.getFullYear()}-${pad(started.getMonth() + 1)}-${pad(started.getDate())} 起累计）`;
+  assert.equal(summaryOf(app).all.kicker, expected);
   assert.equal(summaryOf(app).today.value, '0 硬币');
-  assert.match(summaryOf(app).note, /最多返回 100 条/);
+  assert.match(summaryOf(app).note, /更早没读到的记录不在合计里/);
   await new Promise(resolve => setTimeout(resolve, 200));
   assert.equal(calls, 1);
 });
@@ -684,10 +690,131 @@ test('a failed history read falls back to the visible page and says so', async t
   app.load();
   app.window.document.getElementById('app').innerHTML = `<div class="content" data-v-00192e7f>${historyCard({ question: '昨天结算', status: '2020-01-02 08:00:00', coins: '+5' })}</div>`;
   await flush();
-  await waitFor(() => /暂时无法读取/.test(summaryOf(app).note));
+  await waitFor(() => /这次没能更新接口/.test(summaryOf(app).note));
   const net = summaryOf(app);
   assert.equal(net.today.value, '0 硬币');
   assert.equal(net.all.value, '+5 硬币');
-  assert.equal(net.all.kicker, '历史以来（近 1 条）');
+  assert.match(net.all.kicker, /^历史以来（自 \d{4}-\d{2}-\d{2} 起累计）$/);
+  assert.match(net.note, /这次没能更新接口/);
   assert.equal(calls, 2);
+});
+
+function installMemoryStore(store) {
+  return window => {
+    window.GM_getValue = (key, fallback = null) => (store.has(key) ? store.get(key) : fallback);
+    window.GM_setValue = (key, value) => { store.set(key, value); };
+  };
+}
+
+async function openStoredHistory(t, store, fetchImpl, uid = 1937432404) {
+  const app = setup(t, {
+    workspace: true,
+    prepare: installMemoryStore(store),
+    url: 'https://live.bilibili.com/p/html/live-app-guessing-game/index.html?anchorId=353609978#/history',
+  });
+  app.sdk.getUserInfo = async () => ({ uid, isLogin: true });
+  app.window.fetch = fetchImpl;
+  app.load();
+  app.window.document.getElementById('app').innerHTML = `<div class="content" data-v-00192e7f>${historyCard({ question: '页面占位', status: '进行中', coins: '--' })}</div>`;
+  await flush();
+  return app;
+}
+
+test('later history fetches keep older saved records instead of double counting', async t => {
+  const store = new Map();
+  const older = Math.floor(Date.now() / 1000) - 3 * 24 * 60 * 60;
+  let phase = 1;
+  const app = await openStoredHistory(t, store, async () => jsonPage(phase === 1
+    ? [apiRecord({ id: 1, publish: older, change: 5 }), apiRecord({ id: 2, publish: older, change: 3 })]
+    : [apiRecord({ id: 2, publish: older, change: 3 }), apiRecord({ id: 3, publish: older, change: 4 })]));
+  await waitFor(() => summaryOf(app).all.value === '+8 硬币');
+  phase = 2;
+  app.window.document.querySelector('.title-line > .sub').textContent = '等待结算';
+  await flush();
+  await waitFor(() => summaryOf(app).all.value === '+12 硬币');
+  assert.equal(summaryOf(app).all.kicker, '历史以来');
+  const saved = JSON.parse(store.values().next().value);
+  assert.deepEqual(Object.keys(saved.users['1937432404'].records).sort(), ['1', '2', '3']);
+});
+
+test('saved history stays separated by Bilibili uid', async t => {
+  const store = new Map();
+  const older = Math.floor(Date.now() / 1000) - 2 * 24 * 60 * 60;
+  let uid = 111;
+  const app = await openStoredHistory(t, store, async () => jsonPage([
+    apiRecord({ id: uid, publish: older, change: uid === 111 ? 5 : 9 }),
+  ]), 111);
+  await waitFor(() => summaryOf(app).all.value === '+5 硬币');
+  uid = 222;
+  app.sdk.getUserInfo = async () => ({ uid: 222, isLogin: true });
+  app.window.document.querySelector('.title-line > .sub').textContent = '等待结算';
+  await flush();
+  await waitFor(() => summaryOf(app).all.value === '+9 硬币');
+  uid = 111;
+  app.sdk.getUserInfo = async () => ({ uid: 111, isLogin: true });
+  app.window.document.querySelector('.title-line > .sub').textContent = '进行中';
+  await flush();
+  await waitFor(() => summaryOf(app).all.value === '+5 硬币');
+  const saved = JSON.parse(store.values().next().value);
+  assert.equal(saved.users['111'].records['111'].change, 5);
+  assert.equal(saved.users['222'].records['222'].change, 9);
+});
+
+test('saved history survives a new page load', async t => {
+  const store = new Map();
+  const older = Math.floor(Date.now() / 1000) - 4 * 24 * 60 * 60;
+  const first = await openStoredHistory(t, store, async () => jsonPage([apiRecord({ id: 7, publish: older, change: 6 })]));
+  await waitFor(() => summaryOf(first).all.value === '+6 硬币');
+  const second = await openStoredHistory(t, store, async () => jsonPage([apiRecord({ id: 8, publish: older, change: 1 })]));
+  await waitFor(() => summaryOf(second).all.value === '+7 硬币');
+  assert.equal(summaryOf(second).all.kicker, '历史以来');
+});
+
+test('the archive cap drops the oldest saved records and stops claiming completeness', async t => {
+  const store = new Map();
+  const records = {};
+  for (let index = 1; index <= 2000; index += 1) records[String(index)] = { id: String(index), change: 1, publishedMs: index, title: '', anchor: '' };
+  store.set('bili-prophecy-archive-v1', JSON.stringify({
+    version: 1,
+    users: { '1937432404': { startedAt: new Date(2026, 0, 2, 12).getTime(), complete: true, records } },
+  }));
+  const fresh = Math.floor(Date.now() / 1000);
+  const app = await openStoredHistory(t, store, async () => jsonPage([apiRecord({ id: 99999, publish: fresh, change: 5 })]));
+  await waitFor(() => summaryOf(app).all.value === '+2,004 硬币');
+  assert.equal(summaryOf(app).all.kicker, '历史以来（自 2026-01-02 起累计）');
+  const saved = JSON.parse(store.get('bili-prophecy-archive-v1'));
+  assert.equal(Object.keys(saved.users['1937432404'].records).length, 2000);
+  assert.equal(saved.users['1937432404'].records['1'], undefined);
+  assert.equal(saved.users['1937432404'].complete, false);
+});
+
+test('broken or unavailable storage still shows the current history response', async t => {
+  const app = setup(t, {
+    workspace: true,
+    prepare(window) {
+      window.GM_getValue = () => { throw new Error('blocked'); };
+      window.GM_setValue = () => { throw new Error('blocked'); };
+      Object.defineProperty(window, 'localStorage', { configurable: true, get() { throw new Error('blocked'); } });
+    },
+    url: 'https://live.bilibili.com/p/html/live-app-guessing-game/index.html?anchorId=353609978#/history',
+  });
+  const older = Math.floor(Date.now() / 1000) - 24 * 60 * 60;
+  app.window.fetch = async () => jsonPage([apiRecord({ id: 4, publish: older, change: 5 })]);
+  app.load();
+  app.window.document.getElementById('app').innerHTML = `<div class="content" data-v-00192e7f>${historyCard({ question: '页面占位', status: '进行中', coins: '--' })}</div>`;
+  await flush();
+  await waitFor(() => summaryOf(app).all.value === '+5 硬币');
+  assert.equal(summaryOf(app).all.kicker, '历史以来');
+  assert.match(summaryOf(app).note, /接口返回的全部 1 条/);
+});
+
+test('a corrupt archive is replaced instead of breaking the total', async t => {
+  const store = new Map();
+  store.set('bili-prophecy-archive-v1', '{"version":99,"users":"nope"}');
+  const older = Math.floor(Date.now() / 1000) - 24 * 60 * 60;
+  const app = await openStoredHistory(t, store, async () => jsonPage([apiRecord({ id: 5, publish: older, change: 2 })]));
+  await waitFor(() => summaryOf(app).all.value === '+2 硬币');
+  const saved = JSON.parse(store.get('bili-prophecy-archive-v1'));
+  assert.equal(saved.version, 1);
+  assert.equal(saved.users['1937432404'].records['5'].change, 2);
 });

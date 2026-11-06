@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         B站直播预言
 // @namespace    https://space.bilibili.com/1937432404
-// @version      1.0.0
-// @description  在弹幕输入框上方添加简约预言图标，独立打开官方预言与参与历史，适配桌面交互。
+// @version      1.3.0
+// @description  在弹幕输入框上方添加简约预言图标，独立打开官方预言与参与历史；新标签页标出最新预言，并按今天和本机累计的历史显示硬币净收益。
 // @author       素晴
 // @homepageURL  https://github.com/yunnre060214-sudo/bilibili-userscripts
 // @supportURL   https://github.com/yunnre060214-sudo/bilibili-userscripts/issues
@@ -10,6 +10,8 @@
 // @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/main/bilibili-live-prophecy.user.js
 // @match        https://live.bilibili.com/*
 // @run-at       document-start
+// @grant        GM_getValue
+// @grant        GM_setValue
 // @grant        GM_registerMenuCommand
 // @grant        unsafeWindow
 // ==/UserScript==
@@ -17,7 +19,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.0.0';
+  const VERSION = '1.3.0';
 
   // The official H5 can read account data on desktop, but showConfirm/showToast
   // invoke an App bridge without a WEB/PC_ROOM fallback. Adapt only the UI SDK;
@@ -83,6 +85,9 @@
     let desktopObserver = null;
     let observing = true;
     let eventsBound = false;
+    let accountSDK = null;
+    let historyTask = null;
+    let ledger = { status: 'idle', uid: '', records: [], limited: false, archived: false, complete: false, startedAt: 0, fetchedAt: 0, signature: '', day: '', error: '' };
 
     function ensureRoot() {
       if (shadow?.host.isConnected) return shadow;
@@ -152,7 +157,7 @@
     }
 
     function syncWorkspace() {
-      if (!observing) return;
+      if (!observing || !page.location) return;
       if (shadow && !shadow.host.isConnected) { cancelPending?.(); ensureRoot(); }
       const route = page.location.hash.slice(1) || '/';
       const supported = route === '/' || route === '/history';
@@ -160,6 +165,7 @@
       if (!doc.body || !supported || !content) {
         if (workspace) workspace.host.hidden = true;
         doc.documentElement?.removeAttribute('data-bili-prophecy-workspace');
+        annotatePredictions();
         return;
       }
       if (!workspace?.host.isConnected) {
@@ -209,6 +215,570 @@
         else link.removeAttribute('aria-current');
       }
       workspace.refresh.disabled = Boolean(cancelPending);
+      annotatePredictions();
+    }
+
+    // History already prints the server coin delta as “硬币：”. That value is
+    // smh_num_change: positive income, negative loss, 0, or -- when the round
+    // is unsettled or the user did not join. The current board only prints a
+    // signed result after settlement. Neither number is recalculated here.
+    function parseCoinChange(text, allowBareZero) {
+      const raw = String(text ?? '').trim();
+      const signed = raw.match(/^([+-])(\d+)$/);
+      if (signed) {
+        const value = Number(signed[1] + signed[2]);
+        return Number.isSafeInteger(value) ? { kind: 'value', value } : { kind: 'missing' };
+      }
+      if (allowBareZero && raw === '0') return { kind: 'value', value: 0 };
+      return { kind: 'missing' };
+    }
+
+    function formatCoins(total) {
+      const digits = String(Math.abs(total)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+      if (total > 0) return `+${digits} 硬币`;
+      if (total < 0) return `-${digits} 硬币`;
+      return `${digits} 硬币`;
+    }
+
+    function publishedAt(status) {
+      const match = String(status || '').trim().match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/);
+      if (!match) return null;
+      const parts = match.slice(1).map(Number);
+      const [year, month, day, hour, minute, second] = parts;
+      if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59) return null;
+      const time = new Date(year, month - 1, day, hour, minute, second).getTime();
+      const check = new Date(time);
+      if (check.getFullYear() !== year || check.getMonth() !== month - 1 || check.getDate() !== day) return null;
+      return time;
+    }
+
+    function cardStatus(card) {
+      const fromHistory = card.querySelector(':scope .title-line > .sub')?.textContent?.trim();
+      if (fromHistory) return fromHistory;
+      const fromCurrent = [...card.querySelectorAll(':scope .text-line > .line > .count')]
+        .map(node => node.textContent.trim())
+        .find(text => text && text !== '截止');
+      return fromCurrent || '';
+    }
+
+    function isOpenPrediction(card) {
+      const status = cardStatus(card);
+      return Boolean(card.querySelector(':scope .tick-block .count-time'))
+        || status === '进行中' || status === '等待结算' || status === '未开始';
+    }
+
+    // Current rounds have no publish time, so the official list order is the
+    // only signal and its client keeps newly seen rounds at the front.
+    // History uses publish time. An open record is newer only when the list
+    // already placed it before every dated record.
+    function latestPrediction(cards) {
+      const rows = cards.map((card, index) => ({ card, index, time: publishedAt(cardStatus(card)), open: isOpenPrediction(card) }));
+      const dated = rows.filter(row => row.time !== null);
+      if (!dated.length) return cards[0];
+      const leadingOpen = rows.find(row => row.open && row.index < dated[0].index);
+      if (leadingOpen) return leadingOpen.card;
+      dated.sort((a, b) => (b.time - a.time) || (a.index - b.index));
+      return dated[0].card;
+    }
+
+    function historyCoin(card) {
+      return parseCoinChange(card.querySelector(':scope .line.mt10 > .text-content:last-child')?.textContent, true);
+    }
+
+    function settledCoin(card) {
+      const span = [...card.querySelectorAll(':scope .text-line span')]
+        .find(node => /^[+-]\d+$/.test(node.textContent.trim()) && !node.closest('.tick-block'));
+      return { span, change: span ? parseCoinChange(span.textContent, false) : { kind: 'missing' } };
+    }
+
+    function writeText(node, text) {
+      if (node && node.textContent !== text) node.textContent = text;
+    }
+
+    function predictionCards() {
+      const current = [...doc.querySelectorAll('.user-detail-content > .content-prohets-box')];
+      if (current.length) return { mode: 'current', cards: current };
+      const history = [...doc.querySelectorAll('.content[data-v-00192e7f] > .item-content')];
+      if (history.length) return { mode: 'history', cards: history };
+      return { mode: '', cards: [] };
+    }
+
+    function clearPredictionAnnotations() {
+      doc.querySelectorAll('.bili-prophecy-summary, .bili-prophecy-new').forEach(node => node.remove());
+      doc.querySelectorAll('.bili-prophecy-latest').forEach(node => node.classList.remove('bili-prophecy-latest'));
+      doc.querySelectorAll('.bili-prophecy-settled-net').forEach(node => {
+        node.classList.remove('bili-prophecy-settled-net', 'is-plus', 'is-minus', 'is-zero');
+      });
+    }
+
+    function markLatest(cards) {
+      const newest = latestPrediction(cards);
+      for (const card of cards) {
+        const title = card.querySelector(':scope .title');
+        let badge = card.querySelector(':scope .bili-prophecy-new');
+        if (card === newest && title) {
+          if (!badge) {
+            badge = doc.createElement('span');
+            badge.className = 'bili-prophecy-new';
+            badge.dataset.biliProphecyExtra = 'new';
+            badge.title = '最新一条预言';
+            badge.textContent = '新';
+            title.insertBefore(badge, title.firstChild);
+          }
+          card.classList.add('bili-prophecy-latest');
+        } else {
+          badge?.remove();
+          card.classList.remove('bili-prophecy-latest');
+        }
+      }
+    }
+
+    function markCoinChange(mode, cards) {
+      const changes = [];
+      for (const card of cards) {
+        if (mode === 'history') {
+          const change = historyCoin(card);
+          const sign = change.kind === 'missing' ? 'unknown' : change.value > 0 ? 'plus' : change.value < 0 ? 'minus' : 'zero';
+          if (card.dataset.biliSign !== sign) card.dataset.biliSign = sign;
+          const label = card.querySelector(':scope .line.mt10 > .sub.ml20');
+          if (label && label.getAttribute('aria-label') !== '净收益') label.setAttribute('aria-label', '净收益');
+          changes.push(change);
+          continue;
+        }
+        const { span, change } = settledCoin(card);
+        for (const node of card.querySelectorAll('.bili-prophecy-settled-net')) {
+          if (node !== span) node.classList.remove('bili-prophecy-settled-net', 'is-plus', 'is-minus', 'is-zero');
+        }
+        if (span && change.kind === 'value') {
+          span.classList.add('bili-prophecy-settled-net');
+          span.classList.toggle('is-plus', change.value > 0);
+          span.classList.toggle('is-minus', change.value < 0);
+          span.classList.toggle('is-zero', change.value === 0);
+        }
+        changes.push(change);
+      }
+      return changes;
+    }
+
+    // The official history call is GET /xlive/app-ucenter/v1/elden/hsitory_user?uid=
+    // and the page itself says it can show at most 100 rows. No page, cursor or
+    // size argument exists in that client. Continuation is followed only when a
+    // response explicitly carries has_more or a next cursor.
+    const HISTORY_ENDPOINT = 'https://api.live.bilibili.com/xlive/app-ucenter/v1/elden/hsitory_user';
+    const HISTORY_PAGE_LIMIT = 20;
+    const HISTORY_KNOWN_CAP = 100;
+    const HISTORY_PAGE_GAP = 400;
+    const HISTORY_RETRY_GAP = 800;
+    const HISTORY_CACHE_MS = 180000;
+    const ARCHIVE_KEY = 'bili-prophecy-archive-v1';
+    const ARCHIVE_VERSION = 1;
+    const ARCHIVE_MAX = 2000;
+
+    function integerCoin(value) {
+      if (typeof value === 'number' && Number.isSafeInteger(value)) return value;
+      if (typeof value === 'string' && /^-?\d+$/.test(value.trim())) {
+        const number = Number(value.trim());
+        return Number.isSafeInteger(number) ? number : null;
+      }
+      return null;
+    }
+
+    function pause(ms) {
+      return new Promise(resolve => page.setTimeout(resolve, ms));
+    }
+
+    function dayKey(now = new Date()) {
+      return `${now.getFullYear()}-${now.getMonth() + 1}-${now.getDate()}`;
+    }
+
+    function dayStart(now = new Date()) {
+      return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    }
+
+    function isSettledToday(publishedMs, now = new Date()) {
+      return typeof publishedMs === 'number' && publishedMs >= dayStart(now) && publishedMs <= now.getTime();
+    }
+
+    function normalizeApiRecord(item) {
+      const prophet = item?.prophet || {};
+      const change = integerCoin(item?.smh_num_change);
+      const answer = Number(item?.my_answer);
+      const status = Number(prophet.prophet_status);
+      const publish = Number(prophet.publish_time);
+      const settled = answer >= 1 && status === 3 && change !== null;
+      return {
+        id: prophet.prophet_id == null ? '' : String(prophet.prophet_id),
+        settled,
+        change: settled ? change : null,
+        publishedMs: Number.isFinite(publish) && publish > 0 ? publish * 1000 : null,
+        title: typeof prophet.question?.question === 'string' ? prophet.question.question : '',
+        anchor: typeof item?.anchor_name === 'string' ? item.anchor_name : '',
+      };
+    }
+
+    function cardTitle(card) {
+      const title = card.querySelector(':scope .title');
+      if (!title) return '';
+      return [...title.childNodes].filter(node => !node.classList?.contains('bili-prophecy-new')).map(node => node.textContent || '').join('').trim();
+    }
+
+    function domRecords() {
+      const { mode, cards } = predictionCards();
+      if (!cards.length) return null;
+      return {
+        records: cards.map(card => {
+          const change = mode === 'history' ? historyCoin(card) : settledCoin(card).change;
+          const value = change.kind === 'value' ? change.value : null;
+          return {
+            id: '',
+            settled: value !== null,
+            change: value,
+            publishedMs: publishedAt(cardStatus(card)),
+            title: cardTitle(card),
+            anchor: card.querySelector(':scope .line.mt8 .text-content')?.textContent?.trim() || '',
+          };
+        }),
+        limited: true,
+        page: true,
+      };
+    }
+
+    function formatDay(ms) {
+      const date = new Date(ms);
+      const pad = number => String(number).padStart(2, '0');
+      return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+    }
+
+    function recordKey(record) {
+      if (record.id && !String(record.id).startsWith('fp:')) return String(record.id);
+      if (record.publishedMs == null || record.change == null) return '';
+      return `fp:${record.publishedMs}:${record.change}:${record.title || ''}:${record.anchor || ''}`;
+    }
+
+    function sameMoment(left, right) {
+      return left.publishedMs === right.publishedMs && left.change === right.change && (left.title || '') === (right.title || '') && (left.anchor || '') === (right.anchor || '');
+    }
+
+    function readStorage(key) {
+      try {
+        if (typeof GM_getValue === 'function') return GM_getValue(key, null);
+      } catch { /* Storage can throw when the userscript manager blocks it. */ }
+      try { return page.localStorage.getItem(key); } catch { return null; }
+    }
+
+    function writeStorage(key, value) {
+      try {
+        if (typeof GM_setValue === 'function') {
+          GM_setValue(key, value);
+          return true;
+        }
+      } catch { /* Try the page store below. */ }
+      try {
+        page.localStorage.setItem(key, value);
+        return true;
+      } catch { return false; }
+    }
+
+    function emptyArchive() {
+      return { version: ARCHIVE_VERSION, users: {} };
+    }
+
+    function sanitizeArchive(data) {
+      if (!data || data.version !== ARCHIVE_VERSION || !data.users || typeof data.users !== 'object') return emptyArchive();
+      const users = {};
+      for (const [uid, user] of Object.entries(data.users)) {
+        if (!positiveId(uid) || !user || typeof user.records !== 'object' || user.records === null) continue;
+        const records = {};
+        for (const [id, record] of Object.entries(user.records)) {
+          const change = integerCoin(record?.change);
+          if (!id || change === null) continue;
+          const publishedMs = Number(record.publishedMs);
+          records[id] = {
+            id,
+            change,
+            publishedMs: Number.isFinite(publishedMs) && publishedMs > 0 ? publishedMs : null,
+            title: typeof record.title === 'string' ? record.title.slice(0, 80) : '',
+            anchor: typeof record.anchor === 'string' ? record.anchor.slice(0, 40) : '',
+          };
+        }
+        users[uid] = {
+          startedAt: Number.isFinite(Number(user.startedAt)) ? Number(user.startedAt) : Date.now(),
+          complete: user.complete === true,
+          records,
+        };
+      }
+      return { version: ARCHIVE_VERSION, users };
+    }
+
+    function readArchive() {
+      const raw = readStorage(ARCHIVE_KEY);
+      if (raw == null || raw === '') return emptyArchive();
+      try {
+        return sanitizeArchive(typeof raw === 'string' ? JSON.parse(raw) : raw);
+      } catch {
+        return emptyArchive();
+      }
+    }
+
+    function archiveRecords(user) {
+      return Object.values(user.records).map(record => ({ ...record, settled: true }));
+    }
+
+    function trimArchive(user) {
+      const entries = Object.entries(user.records);
+      if (entries.length <= ARCHIVE_MAX) return;
+      entries.sort((left, right) => (left[1].publishedMs || 0) - (right[1].publishedMs || 0));
+      for (const [id] of entries.slice(0, entries.length - ARCHIVE_MAX)) delete user.records[id];
+      user.complete = false;
+    }
+
+    function mergeArchive(uid, incoming, { authoritative, limited }) {
+      if (!positiveId(uid)) return null;
+      const data = readArchive();
+      if (!data.users[uid]) data.users[uid] = { startedAt: Date.now(), complete: Boolean(authoritative && !limited), records: {} };
+      const user = data.users[uid];
+      if (limited) user.complete = false;
+      for (const record of incoming) {
+        if (!record?.settled || record.change == null) continue;
+        const key = recordKey(record);
+        if (!key) continue;
+        if (key.startsWith('fp:')) {
+          const saved = Object.values(user.records).some(existing => !String(existing.id).startsWith('fp:') && sameMoment(existing, record));
+          if (saved) continue;
+        } else {
+          for (const [id, existing] of Object.entries(user.records)) {
+            if (id.startsWith('fp:') && sameMoment(existing, record)) delete user.records[id];
+          }
+        }
+        const previous = user.records[key];
+        user.records[key] = {
+          id: key,
+          change: record.change,
+          publishedMs: record.publishedMs ?? previous?.publishedMs ?? null,
+          title: (record.title || previous?.title || '').slice(0, 80),
+          anchor: (record.anchor || previous?.anchor || '').slice(0, 40),
+        };
+      }
+      trimArchive(user);
+      if (!writeStorage(ARCHIVE_KEY, JSON.stringify(data))) return null;
+      return { records: archiveRecords(user), complete: user.complete, startedAt: user.startedAt };
+    }
+
+    function settlementSignature() {
+      const { cards } = predictionCards();
+      return cards.map(card => {
+        const history = historyCoin(card);
+        const settled = settledCoin(card).change;
+        return `${cardStatus(card)}|${history.kind === 'value' ? history.value : ''}|${settled.kind === 'value' ? settled.value : ''}`;
+      }).join('\n');
+    }
+
+    function sumCoins(records, include) {
+      const values = records.filter(include).map(record => record.change);
+      if (!values.length) return { kind: 'empty', total: 0 };
+      const total = values.reduce((sum, value) => sum + value, 0);
+      return Number.isSafeInteger(total) ? { kind: 'value', total } : { kind: 'overflow', total: null };
+    }
+
+    async function readHistoryPage(uid, query) {
+      const url = new URL(HISTORY_ENDPOINT);
+      url.searchParams.set('uid', uid);
+      for (const [key, value] of Object.entries(query || {})) if (value != null && value !== '') url.searchParams.set(key, String(value));
+      let error = null;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        if (attempt) await pause(HISTORY_RETRY_GAP);
+        if (!observing) throw new Error('stopped');
+        try {
+          const response = await page.fetch(url.href, { method: 'GET', credentials: 'include' });
+          if (response.status === 429 || response.status >= 500) throw new Error(`retryable ${response.status}`);
+          if (!response.ok) throw new Error(`history HTTP ${response.status}`);
+          const payload = await response.json();
+          if (!payload || payload.code !== 0 || !payload.data) throw new Error('history rejected');
+          return payload.data;
+        } catch (caught) {
+          error = caught;
+          const retryable = caught?.name === 'TypeError' || String(caught?.message || '').startsWith('retryable');
+          if (!retryable || attempt === 1) throw caught;
+        }
+      }
+      throw error;
+    }
+
+    async function fetchAllHistory(uid) {
+      const seen = new Set();
+      const records = [];
+      let limited = false;
+      let cursor = '';
+      for (let pageNumber = 1; pageNumber <= HISTORY_PAGE_LIMIT; pageNumber += 1) {
+        if (pageNumber > 1) await pause(HISTORY_PAGE_GAP);
+        const query = {};
+        if (cursor) query.cursor = cursor;
+        else if (pageNumber > 1) query.page = pageNumber;
+        const data = await readHistoryPage(uid, query);
+        const list = Array.isArray(data.prophet_history) ? data.prophet_history : [];
+        let added = 0;
+        for (const item of list) {
+          const normalized = normalizeApiRecord(item);
+          const key = normalized.id || `row-${pageNumber}-${added}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          records.push(normalized);
+          added += 1;
+        }
+        const next = data.next_cursor || data.cursor?.next || data.page_info?.next_cursor || '';
+        const hasMore = data.has_more === true || data.page_info?.has_more === true || Boolean(next);
+        if (!hasMore) {
+          if (records.length >= HISTORY_KNOWN_CAP) limited = true;
+          break;
+        }
+        if (!added || pageNumber === HISTORY_PAGE_LIMIT) {
+          limited = true;
+          break;
+        }
+        cursor = next ? String(next) : '';
+      }
+      return { records, limited };
+    }
+
+    function scheduleHistory() {
+      if (!observing || !predictionCards().mode || typeof accountSDK?.getUserInfo !== 'function' || historyTask) return;
+      const signature = settlementSignature();
+      const day = dayKey();
+      if ((ledger.status === 'ready' || ledger.status === 'error') && ledger.signature === signature && ledger.day === day && Date.now() - ledger.fetchedAt < HISTORY_CACHE_MS) return;
+      const previous = ledger;
+      const task = refreshHistory(signature, day, previous);
+      historyTask = task;
+      task.finally(() => {
+        if (historyTask === task) historyTask = null;
+        if (observing) scheduleHistory();
+      });
+    }
+
+    function pageSettledRecords() {
+      return (domRecords()?.records || []).filter(record => record.settled && record.publishedMs != null);
+    }
+
+    function applyArchive(uid, incoming, options, previous, signature, day, status, error) {
+      const archived = mergeArchive(uid, incoming, options);
+      if (!archived) return false;
+      ledger = {
+        status, uid, records: archived.records, archived: true, complete: archived.complete,
+        limited: !archived.complete, startedAt: archived.startedAt, fetchedAt: Date.now(), signature, day, error,
+      };
+      return true;
+    }
+
+    async function refreshHistory(signature, day, previous) {
+      if (previous.status !== 'ready') ledger = { ...previous, status: 'loading', error: '' };
+      let uid = '';
+      try {
+        const info = await accountSDK.getUserInfo();
+        uid = positiveId(info?.uid ?? info?.mid) || '';
+        if (!uid) throw new Error('history unsigned');
+        const loaded = await fetchAllHistory(uid);
+        const archived = applyArchive(uid, [...loaded.records, ...pageSettledRecords()], { authoritative: true, limited: loaded.limited }, previous, signature, day, 'ready', '');
+        if (!archived) {
+          ledger = { status: 'ready', uid, records: loaded.records, archived: false, complete: !loaded.limited, limited: loaded.limited, startedAt: 0, fetchedAt: Date.now(), signature, day, error: '' };
+        }
+      } catch (error) {
+        if (error?.message === 'stopped') return;
+        const message = '暂时无法读取参与记录。';
+        const archived = uid ? applyArchive(uid, pageSettledRecords(), { authoritative: false, limited: true }, previous, signature, day, 'error', message) : false;
+        if (!archived) {
+          const sameUser = previous.uid === uid && uid;
+          ledger = { ...previous, status: 'error', uid, records: sameUser ? previous.records : [], archived: sameUser ? previous.archived : false, fetchedAt: Date.now(), signature, day, error: message };
+        }
+      }
+      if (observing) annotatePredictions();
+    }
+
+    function coinFigure(sum) {
+      if (!sum || sum.kind === 'unknown') return { text: '—', sign: 'unknown' };
+      if (sum.kind === 'overflow') return { text: '无法合计', sign: 'unknown' };
+      if (sum.kind === 'loading') return { text: '统计中', sign: 'unknown' };
+      const sign = sum.total > 0 ? 'plus' : sum.total < 0 ? 'minus' : 'zero';
+      return { text: formatCoins(sum.total), sign };
+    }
+
+    function ledgerView() {
+      const pageView = domRecords();
+      const showSaved = ledger.status === 'ready' || (ledger.records.length > 0 && (ledger.status === 'loading' || (ledger.status === 'error' && ledger.archived)));
+      if (showSaved) {
+        const today = sumCoins(ledger.records, record => record.settled && isSettledToday(record.publishedMs));
+        const all = sumCoins(ledger.records, record => record.settled);
+        const counted = ledger.records.filter(record => record.settled).length;
+        const since = formatDay(ledger.startedAt || Date.now());
+        const note = [
+          today.kind === 'empty' ? '今天还没有已结算的参与。' : '',
+          all.kind === 'empty' ? '没有已结算的硬币变化，未结算和未参与不计入。' : '',
+          ledger.archived
+            ? (ledger.complete ? `已累计全部 ${counted} 条已结算记录。` : `从 ${since} 起在本机累计，更早没读到的记录不在合计里。`)
+            : (ledger.limited ? `官方接口最多返回 ${HISTORY_KNOWN_CAP} 条，更早的记录无法合计。` : `历史以来已包含接口返回的全部 ${ledger.records.length} 条。`),
+          ledger.status === 'error' ? '这次没能更新接口，显示的是本机已保存的记录。' : '',
+          ledger.status === 'loading' ? '正在更新…' : '',
+        ].filter(Boolean).join('');
+        const historyLabel = ledger.archived && !ledger.complete
+          ? `历史以来（自 ${since} 起累计）`
+          : (ledger.archived || !ledger.limited ? '历史以来' : `历史以来（近 ${ledger.records.length} 条）`);
+        return { today, all, historyLabel, note };
+      }
+      if ((ledger.status === 'error' || typeof accountSDK?.getUserInfo !== 'function') && pageView) {
+        const settled = pageView.records.filter(record => record.settled);
+        const todayUnknown = settled.some(record => record.publishedMs == null);
+        const today = todayUnknown ? { kind: 'unknown' } : sumCoins(pageView.records, record => record.settled && isSettledToday(record.publishedMs));
+        const all = sumCoins(pageView.records, record => record.settled);
+        const failed = ledger.status === 'error';
+        return {
+          today, all,
+          historyLabel: `历史以来（近 ${pageView.records.length} 条）`,
+          note: [
+            failed ? '暂时无法读取完整记录。' : '',
+            todayUnknown ? '当前页没有结算时间，今天无法计算。' : '按当前页面能看到的记录计算。',
+            '未结算和未参与不计入。',
+            `历史只覆盖这 ${pageView.records.length} 条。`,
+          ].filter(Boolean).join(''),
+        };
+      }
+      if (ledger.status === 'error') return { today: { kind: 'unknown' }, all: { kind: 'unknown' }, historyLabel: '历史以来', note: ledger.error || '暂时无法读取参与记录。' };
+      return { today: { kind: 'loading' }, all: { kind: 'loading' }, historyLabel: '历史以来', note: '正在读取参与记录…' };
+    }
+
+    function renderNetSummary(cards) {
+      const host = cards[0].parentElement;
+      let summary = host.querySelector(':scope > .bili-prophecy-summary');
+      if (!summary || !summary.querySelector('[data-bili-range="today"]')) {
+        summary?.remove();
+        summary = doc.createElement('section');
+        summary.className = 'bili-prophecy-summary';
+        summary.setAttribute('aria-label', '净收益');
+        summary.dataset.biliProphecyExtra = 'summary';
+        summary.innerHTML = '<div class="bili-prophecy-stats"><div class="bili-prophecy-stat" data-bili-range="today"><span class="bili-prophecy-summary-kicker">今天</span><strong class="bili-prophecy-summary-value"></strong></div><div class="bili-prophecy-stat" data-bili-range="all"><span class="bili-prophecy-summary-kicker">历史以来</span><strong class="bili-prophecy-summary-value"></strong></div></div><p class="bili-prophecy-summary-note"></p>';
+        host.insertBefore(summary, cards[0]);
+      } else if (summary.nextElementSibling !== cards[0]) host.insertBefore(summary, cards[0]);
+      const view = ledgerView();
+      const today = coinFigure(view.today);
+      const all = coinFigure(view.all);
+      const todayStat = summary.querySelector('[data-bili-range="today"]');
+      const allStat = summary.querySelector('[data-bili-range="all"]');
+      writeText(todayStat.querySelector('.bili-prophecy-summary-kicker'), '今天');
+      writeText(todayStat.querySelector('.bili-prophecy-summary-value'), today.text);
+      if (todayStat.dataset.biliSign !== today.sign) todayStat.dataset.biliSign = today.sign;
+      writeText(allStat.querySelector('.bili-prophecy-summary-kicker'), view.historyLabel);
+      writeText(allStat.querySelector('.bili-prophecy-summary-value'), all.text);
+      if (allStat.dataset.biliSign !== all.sign) allStat.dataset.biliSign = all.sign;
+      writeText(summary.querySelector('.bili-prophecy-summary-note'), view.note);
+    }
+
+    function annotatePredictions() {
+      const { mode, cards } = predictionCards();
+      if (!mode) {
+        if (doc.querySelector('.bili-prophecy-summary, .bili-prophecy-new, .bili-prophecy-latest, .bili-prophecy-settled-net')) clearPredictionAnnotations();
+        return;
+      }
+      markLatest(cards);
+      markCoinChange(mode, cards);
+      renderNetSummary(cards);
+      scheduleHistory();
     }
 
     function setDialogBusy() {
@@ -267,12 +837,31 @@
         html[data-bili-prophecy-desktop] .tip { opacity: .5; right: 4px; filter: grayscale(1) brightness(.6); }
         html[data-bili-prophecy-desktop] .mb20 { margin-bottom: 16px; }
         html[data-bili-prophecy-desktop] .content-prohets-box,
-        html[data-bili-prophecy-desktop] .item-content { height: auto; min-height: 0; border: 1px solid #e5e8ef; background: #fff; padding: 20px; margin-bottom: 16px; border-radius: 14px; box-shadow: 0 3px 12px #2a496506; }
+        html[data-bili-prophecy-desktop] .item-content { display: flex; flex-direction: column; height: auto; min-height: 0; border: 1px solid #e5e8ef; background: #fff; padding: 20px; margin-bottom: 16px; border-radius: 14px; box-shadow: 0 3px 12px #2a496506; }
         html[data-bili-prophecy-desktop] .content-prohets-box .title,
         html[data-bili-prophecy-desktop] .item-content .title { color: #273449; flex: 1; min-width: 0; font-size: 16px; line-height: 1.6; font-weight: 650; overflow-wrap: anywhere; }
-        html[data-bili-prophecy-desktop] .text-line { min-height: 0; height: auto; padding: 0 0 14px; gap: 12px; align-items: flex-start; }
+        html[data-bili-prophecy-desktop] .bili-prophecy-new { display: inline-flex; align-items: center; justify-content: center; height: 18px; margin-right: 8px; padding: 0 6px; border-radius: 999px; background: linear-gradient(115deg, #fb7299, #ff8aaf); color: #fff; font-size: 11px; font-weight: 700; line-height: 18px; vertical-align: 1px; }
+        html[data-bili-prophecy-desktop] .content-prohets-box.bili-prophecy-latest,
+        html[data-bili-prophecy-desktop] .item-content.bili-prophecy-latest { border-color: #f3b4c8; box-shadow: 0 8px 22px #fb72991a; }
+        html[data-bili-prophecy-desktop] .bili-prophecy-summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 0 0 16px; padding: 14px 16px; border: 1px solid #e5e8ef; border-radius: 14px; background: linear-gradient(115deg, #fff7fa, #f7f8fc 46%, #f3fbfe); }
+        html[data-bili-prophecy-desktop] .bili-prophecy-stats { display: flex; flex-wrap: wrap; gap: 22px; min-width: 0; }
+        html[data-bili-prophecy-desktop] .bili-prophecy-stat { min-width: 112px; }
+        html[data-bili-prophecy-desktop] .bili-prophecy-summary-kicker { display: block; color: #63758b; font-size: 12px; font-weight: 650; }
+        html[data-bili-prophecy-desktop] .bili-prophecy-summary-value { display: block; margin-top: 2px; color: #3e5166; font-size: 26px; line-height: 1.15; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+        html[data-bili-prophecy-desktop] .bili-prophecy-stat[data-bili-sign="plus"] .bili-prophecy-summary-value { color: #d23b73; }
+        html[data-bili-prophecy-desktop] .bili-prophecy-stat[data-bili-sign="minus"] .bili-prophecy-summary-value { color: #c0562a; }
+        html[data-bili-prophecy-desktop] .bili-prophecy-stat[data-bili-sign="zero"] .bili-prophecy-summary-value { color: #3e5166; }
+        html[data-bili-prophecy-desktop] .bili-prophecy-stat[data-bili-sign="unknown"] .bili-prophecy-summary-value { color: #8b99a8; }
+        html[data-bili-prophecy-desktop] .bili-prophecy-summary-note { margin: 0; max-width: 340px; color: #63758b; font-size: 12px; line-height: 1.65; text-align: right; }
+        html[data-bili-prophecy-desktop] .text-line { display: flex; min-height: 0; height: auto; flex-direction: column; align-items: stretch; padding: 0 0 14px; gap: 8px; }
         html[data-bili-prophecy-desktop] .text-line > .line,
-        html[data-bili-prophecy-desktop] .tick-block { flex-shrink: 0; margin-top: 3px; }
+        html[data-bili-prophecy-desktop] .tick-block { display: flex; flex-shrink: 0; flex-direction: row; align-items: center; align-self: flex-start; gap: 8px; margin-top: 0; }
+        html[data-bili-prophecy-desktop] .text-line > .line > .count { padding: 2px 8px; border-radius: 999px; background: #eef3f8; color: #3e5166; font-weight: 650; }
+        html[data-bili-prophecy-desktop] .text-line .bili-prophecy-settled-net { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+        html[data-bili-prophecy-desktop] .text-line .bili-prophecy-settled-net::before { content: "净收益 "; color: #63758b; font-size: 12px; font-weight: 650; }
+        html[data-bili-prophecy-desktop] .text-line .bili-prophecy-settled-net.is-plus { color: #d23b73; }
+        html[data-bili-prophecy-desktop] .text-line .bili-prophecy-settled-net.is-minus { color: #c0562a; }
+        html[data-bili-prophecy-desktop] .text-line .bili-prophecy-settled-net.is-zero { color: #3e5166; }
         html[data-bili-prophecy-desktop] .tickey,
         html[data-bili-prophecy-desktop] .sub-info,
         html[data-bili-prophecy-desktop] .count { color: #63758b; font-size: 12px; }
@@ -290,7 +879,7 @@
         html[data-bili-prophecy-desktop] .bigbox:last-child .box.selected { border-color: #ee85aa; box-shadow: 0 2px 8px #ff66990c; }
         html[data-bili-prophecy-desktop] .box.unselected { opacity: 1; }
         html[data-bili-prophecy-desktop] .content-prohets-box > .line:has(.box.selected) .box.unselected { opacity: .72; }
-        html[data-bili-prophecy-desktop] .block { min-height: 66px; padding: 12px 26px; cursor: default; box-sizing: border-box; }
+        html[data-bili-prophecy-desktop] .block { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 72px; padding: 12px 18px; cursor: default; box-sizing: border-box; }
         html[data-bili-prophecy-desktop] .content-prohets-box:has(.tick-block .count-time):not(:has(.box.selected)) .block { cursor: pointer; }
         html[data-bili-prophecy-desktop] .content-prohets-box:has(.tick-block .count-time):not(:has(.box.selected)) .box:hover { box-shadow: 0 4px 12px #1d8db317; transform: translateY(-1px); }
         html[data-bili-prophecy-desktop] .box .icon { height: 22px; left: 7px; top: 7px; opacity: .7; }
@@ -312,25 +901,30 @@
         html[data-bili-prophecy-desktop] .user-game-footer .heart { width: 18px; opacity: .75; }
         html[data-bili-prophecy-desktop] .heart-num { color: #008dbe; font-size: 18px; line-height: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
         html[data-bili-prophecy-desktop] .h80 { height: 64px; flex-shrink: 0; }
-        html[data-bili-prophecy-desktop] .item-content .title-line { align-items: flex-start; gap: 10px; }
+        html[data-bili-prophecy-desktop] .item-content .title-line { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+        html[data-bili-prophecy-desktop] .item-content .title-line > .sub { flex-shrink: 0; margin-top: 3px; padding: 2px 8px; border-radius: 999px; background: #eef3f8; color: #3e5166; font-size: 12px; font-weight: 650; font-variant-numeric: tabular-nums; }
         html[data-bili-prophecy-desktop] .item-content .sub,
         html[data-bili-prophecy-desktop] .item-content .gary { color: #63758b; }
         html[data-bili-prophecy-desktop] .item-content .text-content,
-        html[data-bili-prophecy-desktop] .item-content .white { color: #516075; }
+        html[data-bili-prophecy-desktop] .item-content .white { color: #516075; overflow-wrap: anywhere; }
+        html[data-bili-prophecy-desktop] .item-content .line.mt10,
+        html[data-bili-prophecy-desktop] .item-content .line.mt8 { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 8px 12px; align-items: center; margin-top: 0; }
+        html[data-bili-prophecy-desktop] .item-content .line.mt10 { margin-top: 4px; padding-top: 12px; border-top: 1px solid #eef2f6; }
+        html[data-bili-prophecy-desktop] .item-content .line.mt10 > .ml20 { margin-left: 0; }
+        html[data-bili-prophecy-desktop] .item-content .line.mt10 > .sub.ml20 { font-size: 0; line-height: 0; }
+        html[data-bili-prophecy-desktop] .item-content .line.mt10 > .sub.ml20::before { content: "净收益"; display: inline-block; color: #63758b; font-size: 12px; line-height: 1.4; font-weight: 650; }
+        html[data-bili-prophecy-desktop] .item-content .line.mt10 > .text-content:last-child { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+        html[data-bili-prophecy-desktop] .item-content[data-bili-sign="plus"] .line.mt10 > .text-content:last-child { color: #d23b73; }
+        html[data-bili-prophecy-desktop] .item-content[data-bili-sign="minus"] .line.mt10 > .text-content:last-child { color: #c0562a; }
+        html[data-bili-prophecy-desktop] .item-content[data-bili-sign="zero"] .line.mt10 > .text-content:last-child { color: #3e5166; }
+        html[data-bili-prophecy-desktop] .item-content[data-bili-sign="unknown"] .line.mt10 > .text-content:last-child { color: #8b99a8; }
         html[data-bili-prophecy-desktop] .header[data-v-00192e7f] .title { color: #526378; font-size: 13px; font-weight: 600; }
         html[data-bili-prophecy-desktop] .empty { margin-top: 54px; }
         html[data-bili-prophecy-desktop] .empty-content .sub { color: #8593a5; max-width: 270px; line-height: 1.8; }
         html[data-bili-prophecy-desktop] .loading p { color: #526378; }
-        @media (min-width: 560px) { html[data-bili-prophecy-desktop] .user-detail-content, html[data-bili-prophecy-desktop] .content[data-v-00192e7f] { max-width: 960px; margin: 0 auto; padding-top: 20px; } html[data-bili-prophecy-desktop] .user-game-footer { max-width: 960px; left: 50%; transform: translateX(-50%); border-radius: 16px 16px 0 0; } }
-        @media (min-width: 1000px) {
-          html[data-bili-prophecy-desktop] .user-detail-content,
-          html[data-bili-prophecy-desktop] .content[data-v-00192e7f] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; align-items: start; }
-          html[data-bili-prophecy-desktop] .user-detail-content > :not(.content-prohets-box),
-          html[data-bili-prophecy-desktop] .content[data-v-00192e7f] > :not(.item-content) { grid-column: 1 / -1; }
-          html[data-bili-prophecy-desktop] .content-prohets-box,
-          html[data-bili-prophecy-desktop] .item-content { margin-bottom: 0; }
-        }
-        @media (max-width: 340px) { html[data-bili-prophecy-desktop] .content-prohets-box, html[data-bili-prophecy-desktop] .item-content { padding: 12px; } html[data-bili-prophecy-desktop] .text-line { gap: 8px; } html[data-bili-prophecy-desktop] .block { padding-left: 14px; padding-right: 14px; } }
+        @media (min-width: 560px) { html[data-bili-prophecy-desktop] .user-detail-content, html[data-bili-prophecy-desktop] .content[data-v-00192e7f] { max-width: 840px; margin: 0 auto; padding-top: 20px; } html[data-bili-prophecy-desktop] .user-game-footer { max-width: 840px; left: 50%; transform: translateX(-50%); border-radius: 16px 16px 0 0; } }
+        @media (max-width: 540px) { html[data-bili-prophecy-desktop] .bili-prophecy-summary { flex-direction: column; align-items: flex-start; } html[data-bili-prophecy-desktop] .bili-prophecy-summary-note { max-width: none; text-align: left; } html[data-bili-prophecy-desktop] .bili-prophecy-summary-value { font-size: 22px; } }
+        @media (max-width: 340px) { html[data-bili-prophecy-desktop] .content-prohets-box, html[data-bili-prophecy-desktop] .item-content { padding: 12px; } html[data-bili-prophecy-desktop] .text-line { gap: 8px; } html[data-bili-prophecy-desktop] .block { padding-left: 14px; padding-right: 14px; } html[data-bili-prophecy-desktop] .item-content .line.mt10, html[data-bili-prophecy-desktop] .item-content .line.mt8 { grid-template-columns: 64px minmax(0, 1fr); gap: 6px 8px; } }
         @media (prefers-reduced-motion: reduce) { html[data-bili-prophecy-desktop] .box { transition: none; } }
       `.replaceAll('html[data-bili-prophecy-desktop]', 'html[data-bili-prophecy-desktop]:has(.user-detail-content, .content[data-v-00192e7f])');
       (doc.head || doc.documentElement).append(style);
@@ -426,7 +1020,9 @@
       sdk.showAlert = options => showModal({ ...options, showCancel: false });
       sdk.showToast = showToast;
       adapter.status = 'ready';
+      accountSDK = sdk;
       ensureRoot();
+      scheduleHistory();
     }
 
     function patchChunk(record) {

@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         B站直播预言
 // @namespace    https://space.bilibili.com/1937432404
-// @version      1.1.0
-// @description  在弹幕输入框上方添加简约预言图标，独立打开官方预言与参与历史；新标签页标出最新预言，并显示硬币净收益。
+// @version      1.2.0
+// @description  在弹幕输入框上方添加简约预言图标，独立打开官方预言与参与历史；新标签页标出最新预言，并分开显示今天和历史以来的硬币净收益。
 // @author       素晴
 // @homepageURL  https://github.com/yunnre060214-sudo/bilibili-userscripts
 // @supportURL   https://github.com/yunnre060214-sudo/bilibili-userscripts/issues
@@ -17,7 +17,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.1.0';
+  const VERSION = '1.2.0';
 
   // The official H5 can read account data on desktop, but showConfirm/showToast
   // invoke an App bridge without a WEB/PC_ROOM fallback. Adapt only the UI SDK;
@@ -83,6 +83,9 @@
     let desktopObserver = null;
     let observing = true;
     let eventsBound = false;
+    let accountSDK = null;
+    let historyTask = null;
+    let ledger = { status: 'idle', uid: '', records: [], limited: false, fetchedAt: 0, signature: '', day: '', error: '' };
 
     function ensureRoot() {
       if (shadow?.host.isConnected) return shadow;
@@ -241,9 +244,9 @@
       const parts = match.slice(1).map(Number);
       const [year, month, day, hour, minute, second] = parts;
       if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59) return null;
-      const time = Date.UTC(year, month - 1, day, hour, minute, second);
+      const time = new Date(year, month - 1, day, hour, minute, second).getTime();
       const check = new Date(time);
-      if (check.getUTCFullYear() !== year || check.getUTCMonth() !== month - 1 || check.getUTCDate() !== day) return null;
+      if (check.getFullYear() !== year || check.getMonth() !== month - 1 || check.getDate() !== day) return null;
       return time;
     }
 
@@ -355,42 +358,242 @@
       return changes;
     }
 
-    function renderNetSummary(cards, mode, changes) {
+    // The official history call is GET /xlive/app-ucenter/v1/elden/hsitory_user?uid=
+    // and the page itself says it can show at most 100 rows. No page, cursor or
+    // size argument exists in that client. Continuation is followed only when a
+    // response explicitly carries has_more or a next cursor.
+    const HISTORY_ENDPOINT = 'https://api.live.bilibili.com/xlive/app-ucenter/v1/elden/hsitory_user';
+    const HISTORY_PAGE_LIMIT = 20;
+    const HISTORY_KNOWN_CAP = 100;
+    const HISTORY_PAGE_GAP = 400;
+    const HISTORY_RETRY_GAP = 800;
+    const HISTORY_CACHE_MS = 180000;
+
+    function integerCoin(value) {
+      if (typeof value === 'number' && Number.isSafeInteger(value)) return value;
+      if (typeof value === 'string' && /^-?\d+$/.test(value.trim())) {
+        const number = Number(value.trim());
+        return Number.isSafeInteger(number) ? number : null;
+      }
+      return null;
+    }
+
+    function pause(ms) {
+      return new Promise(resolve => page.setTimeout(resolve, ms));
+    }
+
+    function dayKey(now = new Date()) {
+      return `${now.getFullYear()}-${now.getMonth() + 1}-${now.getDate()}`;
+    }
+
+    function dayStart(now = new Date()) {
+      return new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+    }
+
+    function isSettledToday(publishedMs, now = new Date()) {
+      return typeof publishedMs === 'number' && publishedMs >= dayStart(now) && publishedMs <= now.getTime();
+    }
+
+    function normalizeApiRecord(item) {
+      const prophet = item?.prophet || {};
+      const change = integerCoin(item?.smh_num_change);
+      const answer = Number(item?.my_answer);
+      const status = Number(prophet.prophet_status);
+      const publish = Number(prophet.publish_time);
+      const settled = answer >= 1 && status === 3 && change !== null;
+      return {
+        id: prophet.prophet_id == null ? '' : String(prophet.prophet_id),
+        settled,
+        change: settled ? change : null,
+        publishedMs: Number.isFinite(publish) && publish > 0 ? publish * 1000 : null,
+      };
+    }
+
+    function domRecords() {
+      const { mode, cards } = predictionCards();
+      if (!cards.length) return null;
+      return {
+        records: cards.map((card, index) => {
+          const change = mode === 'history' ? historyCoin(card) : settledCoin(card).change;
+          const value = change.kind === 'value' ? change.value : null;
+          return { id: `dom-${index}`, settled: value !== null, change: value, publishedMs: publishedAt(cardStatus(card)) };
+        }),
+        limited: true,
+        page: true,
+      };
+    }
+
+    function settlementSignature() {
+      const { cards } = predictionCards();
+      return cards.map(card => {
+        const history = historyCoin(card);
+        const settled = settledCoin(card).change;
+        return `${cardStatus(card)}|${history.kind === 'value' ? history.value : ''}|${settled.kind === 'value' ? settled.value : ''}`;
+      }).join('\n');
+    }
+
+    function sumCoins(records, include) {
+      const values = records.filter(include).map(record => record.change);
+      if (!values.length) return { kind: 'empty', total: 0 };
+      const total = values.reduce((sum, value) => sum + value, 0);
+      return Number.isSafeInteger(total) ? { kind: 'value', total } : { kind: 'overflow', total: null };
+    }
+
+    async function readHistoryPage(uid, query) {
+      const url = new URL(HISTORY_ENDPOINT);
+      url.searchParams.set('uid', uid);
+      for (const [key, value] of Object.entries(query || {})) if (value != null && value !== '') url.searchParams.set(key, String(value));
+      let error = null;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        if (attempt) await pause(HISTORY_RETRY_GAP);
+        if (!observing) throw new Error('stopped');
+        try {
+          const response = await page.fetch(url.href, { method: 'GET', credentials: 'include' });
+          if (response.status === 429 || response.status >= 500) throw new Error(`retryable ${response.status}`);
+          if (!response.ok) throw new Error(`history HTTP ${response.status}`);
+          const payload = await response.json();
+          if (!payload || payload.code !== 0 || !payload.data) throw new Error('history rejected');
+          return payload.data;
+        } catch (caught) {
+          error = caught;
+          const retryable = caught?.name === 'TypeError' || String(caught?.message || '').startsWith('retryable');
+          if (!retryable || attempt === 1) throw caught;
+        }
+      }
+      throw error;
+    }
+
+    async function fetchAllHistory(uid) {
+      const seen = new Set();
+      const records = [];
+      let limited = false;
+      let cursor = '';
+      for (let pageNumber = 1; pageNumber <= HISTORY_PAGE_LIMIT; pageNumber += 1) {
+        if (pageNumber > 1) await pause(HISTORY_PAGE_GAP);
+        const query = {};
+        if (cursor) query.cursor = cursor;
+        else if (pageNumber > 1) query.page = pageNumber;
+        const data = await readHistoryPage(uid, query);
+        const list = Array.isArray(data.prophet_history) ? data.prophet_history : [];
+        let added = 0;
+        for (const item of list) {
+          const normalized = normalizeApiRecord(item);
+          const key = normalized.id || `row-${pageNumber}-${added}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          records.push(normalized);
+          added += 1;
+        }
+        const next = data.next_cursor || data.cursor?.next || data.page_info?.next_cursor || '';
+        const hasMore = data.has_more === true || data.page_info?.has_more === true || Boolean(next);
+        if (!hasMore) {
+          if (records.length >= HISTORY_KNOWN_CAP) limited = true;
+          break;
+        }
+        if (!added || pageNumber === HISTORY_PAGE_LIMIT) {
+          limited = true;
+          break;
+        }
+        cursor = next ? String(next) : '';
+      }
+      return { records, limited };
+    }
+
+    function scheduleHistory() {
+      if (!observing || !predictionCards().mode || typeof accountSDK?.getUserInfo !== 'function' || historyTask) return;
+      const signature = settlementSignature();
+      const day = dayKey();
+      if ((ledger.status === 'ready' || ledger.status === 'error') && ledger.signature === signature && ledger.day === day && Date.now() - ledger.fetchedAt < HISTORY_CACHE_MS) return;
+      const previous = ledger;
+      const task = refreshHistory(signature, day, previous);
+      historyTask = task;
+      task.finally(() => {
+        if (historyTask === task) historyTask = null;
+        if (observing) scheduleHistory();
+      });
+    }
+
+    async function refreshHistory(signature, day, previous) {
+      if (previous.status !== 'ready') ledger = { ...previous, status: 'loading', error: '' };
+      try {
+        const info = await accountSDK.getUserInfo();
+        const uid = positiveId(info?.uid ?? info?.mid);
+        if (!uid) throw new Error('history unsigned');
+        const loaded = await fetchAllHistory(uid);
+        ledger = { status: 'ready', uid, records: loaded.records, limited: loaded.limited, fetchedAt: Date.now(), signature, day, error: '' };
+      } catch (error) {
+        if (error?.message === 'stopped') return;
+        ledger = { ...previous, status: 'error', fetchedAt: Date.now(), signature, day, error: '暂时无法读取参与记录。' };
+      }
+      if (observing) annotatePredictions();
+    }
+
+    function coinFigure(sum) {
+      if (!sum || sum.kind === 'unknown') return { text: '—', sign: 'unknown' };
+      if (sum.kind === 'overflow') return { text: '无法合计', sign: 'unknown' };
+      if (sum.kind === 'loading') return { text: '统计中', sign: 'unknown' };
+      const sign = sum.total > 0 ? 'plus' : sum.total < 0 ? 'minus' : 'zero';
+      return { text: formatCoins(sum.total), sign };
+    }
+
+    function ledgerView() {
+      const pageView = domRecords();
+      if (ledger.status === 'ready' || (ledger.status === 'loading' && ledger.records.length)) {
+        const today = sumCoins(ledger.records, record => record.settled && isSettledToday(record.publishedMs));
+        const all = sumCoins(ledger.records, record => record.settled);
+        const note = [
+          today.kind === 'empty' ? '今天还没有已结算的参与。' : '',
+          all.kind === 'empty' ? '没有已结算的硬币变化，未结算和未参与不计入。' : '',
+          ledger.limited ? `官方接口最多返回 ${HISTORY_KNOWN_CAP} 条，更早的记录无法合计。` : `历史以来已包含接口返回的全部 ${ledger.records.length} 条。`,
+          ledger.status === 'loading' ? '正在更新…' : '',
+        ].filter(Boolean).join('');
+        return { today, all, historyLabel: ledger.limited ? `历史以来（近 ${ledger.records.length} 条）` : '历史以来', note };
+      }
+      if ((ledger.status === 'error' || typeof accountSDK?.getUserInfo !== 'function') && pageView) {
+        const settled = pageView.records.filter(record => record.settled);
+        const todayUnknown = settled.some(record => record.publishedMs == null);
+        const today = todayUnknown ? { kind: 'unknown' } : sumCoins(pageView.records, record => record.settled && isSettledToday(record.publishedMs));
+        const all = sumCoins(pageView.records, record => record.settled);
+        const failed = ledger.status === 'error';
+        return {
+          today, all,
+          historyLabel: `历史以来（近 ${pageView.records.length} 条）`,
+          note: [
+            failed ? '暂时无法读取完整记录。' : '',
+            todayUnknown ? '当前页没有结算时间，今天无法计算。' : '按当前页面能看到的记录计算。',
+            '未结算和未参与不计入。',
+            `历史只覆盖这 ${pageView.records.length} 条。`,
+          ].filter(Boolean).join(''),
+        };
+      }
+      if (ledger.status === 'error') return { today: { kind: 'unknown' }, all: { kind: 'unknown' }, historyLabel: '历史以来', note: ledger.error || '暂时无法读取参与记录。' };
+      return { today: { kind: 'loading' }, all: { kind: 'loading' }, historyLabel: '历史以来', note: '正在读取参与记录…' };
+    }
+
+    function renderNetSummary(cards) {
       const host = cards[0].parentElement;
       let summary = host.querySelector(':scope > .bili-prophecy-summary');
-      if (!summary) {
+      if (!summary || !summary.querySelector('[data-bili-range="today"]')) {
+        summary?.remove();
         summary = doc.createElement('section');
         summary.className = 'bili-prophecy-summary';
         summary.setAttribute('aria-label', '净收益');
         summary.dataset.biliProphecyExtra = 'summary';
-        summary.innerHTML = '<div class="bili-prophecy-summary-main"><span class="bili-prophecy-summary-kicker"></span><strong class="bili-prophecy-summary-value"></strong></div><p class="bili-prophecy-summary-note"></p>';
+        summary.innerHTML = '<div class="bili-prophecy-stats"><div class="bili-prophecy-stat" data-bili-range="today"><span class="bili-prophecy-summary-kicker">今天</span><strong class="bili-prophecy-summary-value"></strong></div><div class="bili-prophecy-stat" data-bili-range="all"><span class="bili-prophecy-summary-kicker">历史以来</span><strong class="bili-prophecy-summary-value"></strong></div></div><p class="bili-prophecy-summary-note"></p>';
         host.insertBefore(summary, cards[0]);
       } else if (summary.nextElementSibling !== cards[0]) host.insertBefore(summary, cards[0]);
-      const known = changes.filter(item => item.kind === 'value');
-      const missing = changes.length - known.length;
-      const kicker = mode === 'history' ? '参与记录净收益' : '已结算净收益';
-      let sign = 'unknown';
-      let valueText = '—';
-      let note = mode === 'history'
-        ? '还没有可计入的硬币变化。未结算或未参与显示为 --，不按 0 计算。'
-        : '还没有已结算结果。进行中的预计奖励不计入。';
-      if (known.length) {
-        const total = known.reduce((sum, item) => sum + item.value, 0);
-        if (!Number.isSafeInteger(total)) {
-          valueText = '无法合计';
-          note = '硬币变化超出可精确合计的范围，没有显示不可靠的总数。';
-        } else {
-          sign = total > 0 ? 'plus' : total < 0 ? 'minus' : 'zero';
-          valueText = formatCoins(total);
-          note = missing
-            ? `${changes.length} 场中 ${known.length} 场已计入，另有 ${missing} 场未结算。`
-            : `${known.length} 场已全部计入。正数为净赚，负数为净亏。`;
-        }
-      }
-      writeText(summary.querySelector('.bili-prophecy-summary-kicker'), kicker);
-      writeText(summary.querySelector('.bili-prophecy-summary-value'), valueText);
-      writeText(summary.querySelector('.bili-prophecy-summary-note'), note);
-      if (summary.dataset.biliSign !== sign) summary.dataset.biliSign = sign;
+      const view = ledgerView();
+      const today = coinFigure(view.today);
+      const all = coinFigure(view.all);
+      const todayStat = summary.querySelector('[data-bili-range="today"]');
+      const allStat = summary.querySelector('[data-bili-range="all"]');
+      writeText(todayStat.querySelector('.bili-prophecy-summary-kicker'), '今天');
+      writeText(todayStat.querySelector('.bili-prophecy-summary-value'), today.text);
+      if (todayStat.dataset.biliSign !== today.sign) todayStat.dataset.biliSign = today.sign;
+      writeText(allStat.querySelector('.bili-prophecy-summary-kicker'), view.historyLabel);
+      writeText(allStat.querySelector('.bili-prophecy-summary-value'), all.text);
+      if (allStat.dataset.biliSign !== all.sign) allStat.dataset.biliSign = all.sign;
+      writeText(summary.querySelector('.bili-prophecy-summary-note'), view.note);
     }
 
     function annotatePredictions() {
@@ -400,7 +603,9 @@
         return;
       }
       markLatest(cards);
-      renderNetSummary(cards, mode, markCoinChange(mode, cards));
+      markCoinChange(mode, cards);
+      renderNetSummary(cards);
+      scheduleHistory();
     }
 
     function setDialogBusy() {
@@ -466,13 +671,15 @@
         html[data-bili-prophecy-desktop] .content-prohets-box.bili-prophecy-latest,
         html[data-bili-prophecy-desktop] .item-content.bili-prophecy-latest { border-color: #f3b4c8; box-shadow: 0 8px 22px #fb72991a; }
         html[data-bili-prophecy-desktop] .bili-prophecy-summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 0 0 16px; padding: 14px 16px; border: 1px solid #e5e8ef; border-radius: 14px; background: linear-gradient(115deg, #fff7fa, #f7f8fc 46%, #f3fbfe); }
+        html[data-bili-prophecy-desktop] .bili-prophecy-stats { display: flex; flex-wrap: wrap; gap: 22px; min-width: 0; }
+        html[data-bili-prophecy-desktop] .bili-prophecy-stat { min-width: 112px; }
         html[data-bili-prophecy-desktop] .bili-prophecy-summary-kicker { display: block; color: #63758b; font-size: 12px; font-weight: 650; }
-        html[data-bili-prophecy-desktop] .bili-prophecy-summary-value { display: block; margin-top: 2px; color: #3e5166; font-size: 28px; line-height: 1.15; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
-        html[data-bili-prophecy-desktop] .bili-prophecy-summary[data-bili-sign="plus"] .bili-prophecy-summary-value { color: #d23b73; }
-        html[data-bili-prophecy-desktop] .bili-prophecy-summary[data-bili-sign="minus"] .bili-prophecy-summary-value { color: #c0562a; }
-        html[data-bili-prophecy-desktop] .bili-prophecy-summary[data-bili-sign="zero"] .bili-prophecy-summary-value { color: #3e5166; }
-        html[data-bili-prophecy-desktop] .bili-prophecy-summary[data-bili-sign="unknown"] .bili-prophecy-summary-value { color: #8b99a8; }
-        html[data-bili-prophecy-desktop] .bili-prophecy-summary-note { margin: 0; max-width: 320px; color: #63758b; font-size: 12px; line-height: 1.65; text-align: right; }
+        html[data-bili-prophecy-desktop] .bili-prophecy-summary-value { display: block; margin-top: 2px; color: #3e5166; font-size: 26px; line-height: 1.15; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+        html[data-bili-prophecy-desktop] .bili-prophecy-stat[data-bili-sign="plus"] .bili-prophecy-summary-value { color: #d23b73; }
+        html[data-bili-prophecy-desktop] .bili-prophecy-stat[data-bili-sign="minus"] .bili-prophecy-summary-value { color: #c0562a; }
+        html[data-bili-prophecy-desktop] .bili-prophecy-stat[data-bili-sign="zero"] .bili-prophecy-summary-value { color: #3e5166; }
+        html[data-bili-prophecy-desktop] .bili-prophecy-stat[data-bili-sign="unknown"] .bili-prophecy-summary-value { color: #8b99a8; }
+        html[data-bili-prophecy-desktop] .bili-prophecy-summary-note { margin: 0; max-width: 340px; color: #63758b; font-size: 12px; line-height: 1.65; text-align: right; }
         html[data-bili-prophecy-desktop] .text-line { display: flex; min-height: 0; height: auto; flex-direction: column; align-items: stretch; padding: 0 0 14px; gap: 8px; }
         html[data-bili-prophecy-desktop] .text-line > .line,
         html[data-bili-prophecy-desktop] .tick-block { display: flex; flex-shrink: 0; flex-direction: row; align-items: center; align-self: flex-start; gap: 8px; margin-top: 0; }
@@ -543,7 +750,7 @@
         html[data-bili-prophecy-desktop] .empty-content .sub { color: #8593a5; max-width: 270px; line-height: 1.8; }
         html[data-bili-prophecy-desktop] .loading p { color: #526378; }
         @media (min-width: 560px) { html[data-bili-prophecy-desktop] .user-detail-content, html[data-bili-prophecy-desktop] .content[data-v-00192e7f] { max-width: 840px; margin: 0 auto; padding-top: 20px; } html[data-bili-prophecy-desktop] .user-game-footer { max-width: 840px; left: 50%; transform: translateX(-50%); border-radius: 16px 16px 0 0; } }
-        @media (max-width: 540px) { html[data-bili-prophecy-desktop] .bili-prophecy-summary { flex-direction: column; align-items: flex-start; } html[data-bili-prophecy-desktop] .bili-prophecy-summary-note { text-align: left; } html[data-bili-prophecy-desktop] .bili-prophecy-summary-value { font-size: 24px; } }
+        @media (max-width: 540px) { html[data-bili-prophecy-desktop] .bili-prophecy-summary { flex-direction: column; align-items: flex-start; } html[data-bili-prophecy-desktop] .bili-prophecy-summary-note { max-width: none; text-align: left; } html[data-bili-prophecy-desktop] .bili-prophecy-summary-value { font-size: 22px; } }
         @media (max-width: 340px) { html[data-bili-prophecy-desktop] .content-prohets-box, html[data-bili-prophecy-desktop] .item-content { padding: 12px; } html[data-bili-prophecy-desktop] .text-line { gap: 8px; } html[data-bili-prophecy-desktop] .block { padding-left: 14px; padding-right: 14px; } html[data-bili-prophecy-desktop] .item-content .line.mt10, html[data-bili-prophecy-desktop] .item-content .line.mt8 { grid-template-columns: 64px minmax(0, 1fr); gap: 6px 8px; } }
         @media (prefers-reduced-motion: reduce) { html[data-bili-prophecy-desktop] .box { transition: none; } }
       `.replaceAll('html[data-bili-prophecy-desktop]', 'html[data-bili-prophecy-desktop]:has(.user-detail-content, .content[data-v-00192e7f])');
@@ -640,7 +847,9 @@
       sdk.showAlert = options => showModal({ ...options, showCancel: false });
       sdk.showToast = showToast;
       adapter.status = 'ready';
+      accountSDK = sdk;
       ensureRoot();
+      scheduleHistory();
     }
 
     function patchChunk(record) {

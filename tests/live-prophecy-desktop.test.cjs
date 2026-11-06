@@ -423,21 +423,24 @@ async function showBoard(t, html, hash = '#/') {
 function summaryOf(app) {
   const summary = app.window.document.querySelector('.bili-prophecy-summary');
   assert.ok(summary, 'missing net summary');
-  return {
-    summary,
-    kicker: summary.querySelector('.bili-prophecy-summary-kicker').textContent,
-    value: summary.querySelector('.bili-prophecy-summary-value').textContent,
-    note: summary.querySelector('.bili-prophecy-summary-note').textContent,
-    sign: summary.dataset.biliSign,
+  const stat = range => {
+    const node = summary.querySelector(`[data-bili-range="${range}"]`);
+    assert.ok(node, `missing ${range} total`);
+    return {
+      kicker: node.querySelector('.bili-prophecy-summary-kicker').textContent,
+      value: node.querySelector('.bili-prophecy-summary-value').textContent,
+      sign: node.dataset.biliSign,
+    };
   };
+  return { summary, note: summary.querySelector('.bili-prophecy-summary-note').textContent, today: stat('today'), all: stat('all') };
 }
 
-test('prophecy 1.1.0 is the version declared to users', () => {
-  assert.equal(source.match(/^\/\/ @version\s+(\S+)/m)[1], '1.1.0');
-  assert.match(source, /const VERSION = '1\.1\.0'/);
+test('prophecy 1.2.0 is the version declared to users', () => {
+  assert.equal(source.match(/^\/\/ @version\s+(\S+)/m)[1], '1.2.0');
+  assert.match(source, /const VERSION = '1\.2\.0'/);
   const readme = fs.readFileSync(path.join(__dirname, '..', 'README.md'), 'utf8');
-  assert.match(readme, /^## B站直播预言 1\.1\.0$/m);
-  assert.match(readme, /安装 B站直播预言 1\.1\.0/);
+  assert.match(readme, /^## B站直播预言 1\.2\.0$/m);
+  assert.match(readme, /安装 B站直播预言 1\.2\.0/);
 });
 
 test('history lays out the newest prediction and sums settled coin changes', async t => {
@@ -455,11 +458,14 @@ test('history lays out the newest prediction and sums settled coin changes', asy
   assert.deepEqual(cards.map(card => card.dataset.biliSign), ['plus', 'unknown', 'minus', 'zero']);
   assert.equal(cards[1].querySelector('.sub.ml20').getAttribute('aria-label'), '净收益');
   const net = summaryOf(app);
-  assert.equal(net.kicker, '参与记录净收益');
-  assert.equal(net.value, '+3 硬币');
-  assert.equal(net.sign, 'plus');
-  assert.match(net.note, /4 场中 3 场已计入/);
-  assert.match(net.note, /另有 1 场未结算/);
+  assert.equal(net.today.kicker, '今天');
+  assert.equal(net.today.value, '0 硬币');
+  assert.equal(net.today.sign, 'zero');
+  assert.equal(net.all.kicker, '历史以来（近 4 条）');
+  assert.equal(net.all.value, '+3 硬币');
+  assert.equal(net.all.sign, 'plus');
+  assert.match(net.note, /未结算和未参与不计入/);
+  assert.match(net.note, /这 4 条/);
   const css = app.window.document.getElementById('bili-prophecy-theme').textContent;
   assert.match(css, /\.bili-prophecy-new/);
   assert.match(css, /content:\s*"净收益"/);
@@ -479,8 +485,9 @@ test('an open history record is newest only when it is listed before dated recor
     historyCard({ question: '更晚公布', status: '2026-05-01 00:00:00', coins: '-4' }),
   ].join('')}</div>`, '#/history');
   assert.match(datedNewest.window.document.querySelector('.bili-prophecy-latest .title').textContent, /更晚公布/);
-  assert.equal(summaryOf(datedNewest).value, '-3 硬币');
-  assert.equal(summaryOf(datedNewest).sign, 'minus');
+  assert.equal(summaryOf(datedNewest).all.value, '-3 硬币');
+  assert.equal(summaryOf(datedNewest).all.sign, 'minus');
+  assert.equal(summaryOf(datedNewest).today.value, '0 硬币');
 });
 
 test('equal publish times keep the earlier card, and invalid dates are ignored', async t => {
@@ -490,7 +497,8 @@ test('equal publish times keep the earlier card, and invalid dates are ignored',
     historyCard({ question: '并列靠后', status: '2026-04-01 00:00:00', coins: '+234' }),
   ].join('')}</div>`, '#/history');
   assert.match(app.window.document.querySelector('.bili-prophecy-latest .title').textContent, /并列靠前/);
-  assert.equal(summaryOf(app).value, '+1,243 硬币');
+  assert.equal(summaryOf(app).all.value, '+1,243 硬币');
+  assert.equal(summaryOf(app).today.value, '—');
   assert.equal(app.window.document.querySelectorAll('.item-content')[1].dataset.biliSign, 'plus');
 });
 
@@ -504,9 +512,10 @@ test('missing history coin changes stay unknown and are not treated as zero', as
   assert.equal(cards[1].querySelector('.bili-prophecy-new'), null);
   assert.deepEqual(cards.map(card => card.dataset.biliSign), ['unknown', 'unknown']);
   const net = summaryOf(app);
-  assert.equal(net.value, '—');
-  assert.equal(net.sign, 'unknown');
-  assert.match(net.note, /不按 0 计算/);
+  assert.equal(net.today.value, '0 硬币');
+  assert.equal(net.all.value, '0 硬币');
+  assert.equal(net.all.sign, 'zero');
+  assert.match(net.note, /未结算和未参与不计入/);
 });
 
 test('current board badges the first card and sums only signed settled results', async t => {
@@ -523,11 +532,13 @@ test('current board badges the first card and sums only signed settled results',
   assert.equal(cards[2].querySelector('.bili-prophecy-settled-net').classList.contains('is-minus'), true);
   assert.equal(cards[3].querySelector('.bili-prophecy-settled-net'), null);
   const net = summaryOf(app);
-  assert.equal(net.kicker, '已结算净收益');
-  assert.equal(net.value, '+3 硬币');
-  assert.equal(net.sign, 'plus');
-  assert.doesNotMatch(net.value, /10|12/);
-  assert.match(net.note, /另有 2 场未结算/);
+  assert.equal(net.today.value, '—');
+  assert.equal(net.today.sign, 'unknown');
+  assert.equal(net.all.kicker, '历史以来（近 4 条）');
+  assert.equal(net.all.value, '+3 硬币');
+  assert.equal(net.all.sign, 'plus');
+  assert.doesNotMatch(`${net.today.value} ${net.all.value}`, /10|12/);
+  assert.match(net.note, /今天无法计算/);
 });
 
 test('a settled current board without timestamps badges the first card and can net to zero', async t => {
@@ -537,9 +548,10 @@ test('a settled current board without timestamps badges the first card and can n
     currentCard({ question: '另一场', net: '-2' }),
   ].join('')}</div>`);
   assert.match(app.window.document.querySelector('.bili-prophecy-latest .title').textContent, /后出现的结算/);
-  assert.equal(summaryOf(app).value, '0 硬币');
-  assert.equal(summaryOf(app).sign, 'zero');
-  assert.match(summaryOf(app).note, /另有 1 场未结算/);
+  assert.equal(summaryOf(app).all.value, '0 硬币');
+  assert.equal(summaryOf(app).all.sign, 'zero');
+  assert.equal(summaryOf(app).today.value, '—');
+  assert.match(summaryOf(app).note, /今天无法计算/);
 });
 
 test('annotation stays single after repeat mutations and disappears when the cards do', async t => {
@@ -547,16 +559,135 @@ test('annotation stays single after repeat mutations and disappears when the car
     historyCard({ question: '会变化', status: '2026-06-01 00:00:00', coins: '+5' }),
     historyCard({ question: '固定', status: '2026-05-01 00:00:00', coins: '-2' }),
   ].join('')}</div>`, '#/history');
-  assert.equal(summaryOf(app).value, '+3 硬币');
+  assert.equal(summaryOf(app).all.value, '+3 硬币');
   app.window.document.body.append(app.window.document.createElement('i'));
   await flush();
   assert.equal(app.window.document.querySelectorAll('.bili-prophecy-new').length, 1);
   assert.equal(app.window.document.querySelectorAll('.bili-prophecy-summary').length, 1);
   app.window.document.querySelector('.text-content:last-child').textContent = '+8';
   await flush();
-  assert.equal(summaryOf(app).value, '+6 硬币');
+  assert.equal(summaryOf(app).all.value, '+6 硬币');
   app.window.document.getElementById('app').innerHTML = '<div class="user-detail-content"></div>';
   await flush();
   assert.equal(app.window.document.querySelector('.bili-prophecy-summary'), null);
   assert.equal(app.window.document.querySelector('.bili-prophecy-new'), null);
+});
+
+function apiRecord({ id, status = 3, publish, change, answer = 1 }) {
+  return {
+    prophet: { prophet_id: id, prophet_status: status, publish_time: publish, question: { question: `题目${id}` } },
+    my_answer: answer,
+    smh_num_change: change,
+    anchor_name: '测试主播',
+  };
+}
+
+function jsonPage(records, extra = {}) {
+  return { ok: true, status: 200, json: async () => ({ code: 0, data: { prophet_history: records, ...extra } }) };
+}
+
+const waitFor = async predicate => {
+  const started = Date.now();
+  while (Date.now() - started < 3000) {
+    if (predicate()) return;
+    await new Promise(resolve => setTimeout(resolve, 30));
+  }
+  assert.fail('timed out waiting for history totals');
+};
+
+async function showFetched(t, fetchImpl) {
+  const app = setup(t, { workspace: true, url: 'https://live.bilibili.com/p/html/live-app-guessing-game/index.html?anchorId=353609978#/history' });
+  app.window.fetch = fetchImpl;
+  app.load();
+  app.window.document.getElementById('app').innerHTML = `<div class="content" data-v-00192e7f>${historyCard({ question: '页面占位', status: '进行中', coins: '--' })}</div>`;
+  await flush();
+  return app;
+}
+
+test('today uses the local midnight boundary and ignores unsettled rows', async t => {
+  const now = new Date();
+  const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const seconds = date => Math.floor(date.getTime() / 1000);
+  const records = [
+    apiRecord({ id: 1, publish: seconds(new Date(midnight.getTime() - 1000)), change: 5 }),
+    apiRecord({ id: 2, publish: seconds(midnight), change: 3 }),
+    apiRecord({ id: 3, publish: seconds(new Date(midnight.getTime() + 1000)), change: -1 }),
+    apiRecord({ id: 4, publish: seconds(new Date(now.getTime() + 60 * 1000)), change: 9 }),
+    apiRecord({ id: 5, publish: seconds(now), change: 7, status: 2 }),
+    apiRecord({ id: 6, publish: seconds(now), change: 4, answer: 0 }),
+    apiRecord({ id: 7, publish: seconds(now), change: null }),
+  ];
+  let calls = 0;
+  const app = await showFetched(t, async () => { calls += 1; return jsonPage(records); });
+  await waitFor(() => summaryOf(app).today.value === '+2 硬币');
+  const net = summaryOf(app);
+  assert.equal(net.today.sign, 'plus');
+  assert.equal(net.all.value, '+16 硬币');
+  assert.equal(net.all.kicker, '历史以来');
+  assert.match(net.note, /全部 7 条/);
+  assert.equal(calls, 1);
+});
+
+test('explicit history pages are fetched sequentially and duplicates are not summed twice', async t => {
+  const now = new Date();
+  const midnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const today = Math.floor(new Date(midnight.getTime() + 60 * 1000).getTime() / 1000);
+  const older = Math.floor(new Date(midnight.getTime() - 24 * 60 * 60 * 1000).getTime() / 1000);
+  const calls = [];
+  const app = await showFetched(t, async url => {
+    calls.push({ url: String(url), at: Date.now() });
+    const cursor = new URL(url).searchParams.get('cursor');
+    if (cursor === 'p2') {
+      return jsonPage([
+        apiRecord({ id: 3, publish: older, change: 4 }),
+        apiRecord({ id: 1, publish: today, change: 8 }),
+      ]);
+    }
+    return jsonPage([
+      apiRecord({ id: 1, publish: today, change: 8 }),
+      apiRecord({ id: 2, publish: older, change: -2 }),
+    ], { has_more: true, next_cursor: 'p2' });
+  });
+  await waitFor(() => summaryOf(app).all.value === '+10 硬币');
+  assert.equal(summaryOf(app).today.value, '+8 硬币');
+  assert.equal(summaryOf(app).all.kicker, '历史以来');
+  assert.equal(calls.length, 2);
+  assert.ok(calls[1].at - calls[0].at >= 300, 'pages should be requested one after another');
+  assert.match(calls[1].url, /cursor=p2/);
+  app.window.document.body.append(app.window.document.createElement('i'));
+  await flush();
+  await new Promise(resolve => setTimeout(resolve, 200));
+  assert.equal(calls.length, 2);
+  app.window.document.querySelector('.title-line > .sub').textContent = '等待结算';
+  await flush();
+  await waitFor(() => calls.length >= 3);
+  assert.equal(summaryOf(app).all.value, '+10 硬币');
+});
+
+test('a 100-row history response is labeled as a partial all-time total', async t => {
+  const older = Math.floor(Date.now() / 1000) - 10 * 24 * 60 * 60;
+  const records = Array.from({ length: 100 }, (_, index) => apiRecord({ id: index + 1, publish: older, change: 1 }));
+  let calls = 0;
+  const app = await showFetched(t, async () => { calls += 1; return jsonPage(records); });
+  await waitFor(() => summaryOf(app).all.value === '+100 硬币');
+  assert.equal(summaryOf(app).all.kicker, '历史以来（近 100 条）');
+  assert.equal(summaryOf(app).today.value, '0 硬币');
+  assert.match(summaryOf(app).note, /最多返回 100 条/);
+  await new Promise(resolve => setTimeout(resolve, 200));
+  assert.equal(calls, 1);
+});
+
+test('a failed history read falls back to the visible page and says so', async t => {
+  let calls = 0;
+  const app = setup(t, { workspace: true, url: 'https://live.bilibili.com/p/html/live-app-guessing-game/index.html?anchorId=353609978#/history' });
+  app.window.fetch = async () => { calls += 1; throw new TypeError('offline'); };
+  app.load();
+  app.window.document.getElementById('app').innerHTML = `<div class="content" data-v-00192e7f>${historyCard({ question: '昨天结算', status: '2020-01-02 08:00:00', coins: '+5' })}</div>`;
+  await flush();
+  await waitFor(() => /暂时无法读取/.test(summaryOf(app).note));
+  const net = summaryOf(app);
+  assert.equal(net.today.value, '0 硬币');
+  assert.equal(net.all.value, '+5 硬币');
+  assert.equal(net.all.kicker, '历史以来（近 1 条）');
+  assert.equal(calls, 2);
 });

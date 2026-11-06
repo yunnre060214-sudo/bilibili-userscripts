@@ -398,3 +398,165 @@ test('a synchronous toast after root removal cancels the detached confirmation a
   assert.equal(doc.body.style.overflow, 'auto');
   assert.equal(content.inert, false);
 });
+
+function historyCard({ question, status, answer = '会赢', coins, anchor = '测试主播' }) {
+  return `<article class="item-content"><div class="title-line"><span class="title">${question}</span><span class="sub">${status}</span></div><div class="line mt10"><span class="sub">题目答案：</span><span class="text-content">${answer}</span><span class="sub ml20">硬币：</span><span class="text-content">${coins}</span></div><div class="line mt8"><span class="sub">主播名称：</span><span class="text-content">${anchor}</span></div></article>`;
+}
+
+function currentCard({ question, ticket, countdown, net, status, potential }) {
+  let aside = '';
+  if (countdown) aside = `<div class="tick-block"><div class="line"><span class="tickey">门票：</span><span class="tickey">${ticket ?? ''}</span></div><div class="line"><span class="count-time">${countdown}</span><span class="count ml4">截止</span></div></div>`;
+  else if (net) aside = `<div class="line"><div class="line"><span class="${String(net).startsWith('+') ? 'pinkText' : 'count'}">${net}</span></div></div>`;
+  else if (status) aside = `<div class="line"><span class="count">${status}</span></div>`;
+  const hint = potential ? `<span class="sub-score">预言成功得${potential}硬币</span>` : '';
+  return `<article class="content-prohets-box"><div class="text-line"><span class="title">${question}</span>${aside}</div><div class="line mt8"><div class="bigbox"><div class="box"><div class="block"><span class="count-time">会</span>${hint}</div></div></div></div></article>`;
+}
+
+async function showBoard(t, html, hash = '#/') {
+  const app = setup(t, { workspace: true, url: `https://live.bilibili.com/p/html/live-app-guessing-game/index.html?anchorId=353609978${hash}` });
+  app.window.document.getElementById('app').innerHTML = html;
+  await flush();
+  await flush();
+  return app;
+}
+
+function summaryOf(app) {
+  const summary = app.window.document.querySelector('.bili-prophecy-summary');
+  assert.ok(summary, 'missing net summary');
+  return {
+    summary,
+    kicker: summary.querySelector('.bili-prophecy-summary-kicker').textContent,
+    value: summary.querySelector('.bili-prophecy-summary-value').textContent,
+    note: summary.querySelector('.bili-prophecy-summary-note').textContent,
+    sign: summary.dataset.biliSign,
+  };
+}
+
+test('prophecy 1.1.0 is the version declared to users', () => {
+  assert.equal(source.match(/^\/\/ @version\s+(\S+)/m)[1], '1.1.0');
+  assert.match(source, /const VERSION = '1\.1\.0'/);
+  const readme = fs.readFileSync(path.join(__dirname, '..', 'README.md'), 'utf8');
+  assert.match(readme, /^## B站直播预言 1\.1\.0$/m);
+  assert.match(readme, /安装 B站直播预言 1\.1\.0/);
+});
+
+test('history lays out the newest prediction and sums settled coin changes', async t => {
+  const app = await showBoard(t, `<div class="content" data-v-00192e7f><div class="header"><span class="title">我的预言</span></div>${[
+    historyCard({ question: '一月旧题', status: '2026-01-02 08:00:00', coins: '+5' }),
+    historyCard({ question: '三月新题', status: '2026-03-04 09:30:00', coins: '--' }),
+    historyCard({ question: '二月题', status: '2026-02-02 10:00:00', coins: '-2' }),
+    historyCard({ question: '持平题', status: '2026-02-02 11:00:00', coins: '0' }),
+  ].join('')}</div>`, '#/history');
+  const cards = [...app.window.document.querySelectorAll('.item-content')];
+  assert.equal(cards.filter(card => card.querySelector('.bili-prophecy-new')).length, 1);
+  assert.equal(cards[1].querySelector('.bili-prophecy-new').textContent, '新');
+  assert.equal(cards[1].classList.contains('bili-prophecy-latest'), true);
+  assert.equal(cards[1].querySelector('.title').firstElementChild, cards[1].querySelector('.bili-prophecy-new'));
+  assert.deepEqual(cards.map(card => card.dataset.biliSign), ['plus', 'unknown', 'minus', 'zero']);
+  assert.equal(cards[1].querySelector('.sub.ml20').getAttribute('aria-label'), '净收益');
+  const net = summaryOf(app);
+  assert.equal(net.kicker, '参与记录净收益');
+  assert.equal(net.value, '+3 硬币');
+  assert.equal(net.sign, 'plus');
+  assert.match(net.note, /4 场中 3 场已计入/);
+  assert.match(net.note, /另有 1 场未结算/);
+  const css = app.window.document.getElementById('bili-prophecy-theme').textContent;
+  assert.match(css, /\.bili-prophecy-new/);
+  assert.match(css, /content:\s*"净收益"/);
+  assert.doesNotMatch(css, /repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
+});
+
+test('an open history record is newest only when it is listed before dated records', async t => {
+  const openFirst = await showBoard(t, `<div class="content" data-v-00192e7f>${[
+    historyCard({ question: '仍在进行', status: '进行中', coins: '--' }),
+    historyCard({ question: '已公布', status: '2026-11-06 12:00:00', coins: '+1' }),
+  ].join('')}</div>`, '#/history');
+  assert.equal(openFirst.window.document.querySelector('.bili-prophecy-latest .title').textContent, '新仍在进行');
+
+  const datedNewest = await showBoard(t, `<div class="content" data-v-00192e7f>${[
+    historyCard({ question: '较早', status: '2026-01-01 00:00:00', coins: '+1' }),
+    historyCard({ question: '仍在进行', status: '等待结算', coins: '--' }),
+    historyCard({ question: '更晚公布', status: '2026-05-01 00:00:00', coins: '-4' }),
+  ].join('')}</div>`, '#/history');
+  assert.match(datedNewest.window.document.querySelector('.bili-prophecy-latest .title').textContent, /更晚公布/);
+  assert.equal(summaryOf(datedNewest).value, '-3 硬币');
+  assert.equal(summaryOf(datedNewest).sign, 'minus');
+});
+
+test('equal publish times keep the earlier card, and invalid dates are ignored', async t => {
+  const app = await showBoard(t, `<div class="content" data-v-00192e7f>${[
+    historyCard({ question: '并列靠前', status: '2026-04-01 00:00:00', coins: '+1000' }),
+    historyCard({ question: '非法日期', status: '2026-02-31 00:00:00', coins: '+9' }),
+    historyCard({ question: '并列靠后', status: '2026-04-01 00:00:00', coins: '+234' }),
+  ].join('')}</div>`, '#/history');
+  assert.match(app.window.document.querySelector('.bili-prophecy-latest .title').textContent, /并列靠前/);
+  assert.equal(summaryOf(app).value, '+1,243 硬币');
+  assert.equal(app.window.document.querySelectorAll('.item-content')[1].dataset.biliSign, 'plus');
+});
+
+test('missing history coin changes stay unknown and are not treated as zero', async t => {
+  const app = await showBoard(t, `<div class="content" data-v-00192e7f>${[
+    historyCard({ question: '取消的预言', status: '主播取消', coins: '--' }),
+    historyCard({ question: '另一条', status: '未开始', coins: '  ' }),
+  ].join('')}</div>`, '#/history');
+  const cards = [...app.window.document.querySelectorAll('.item-content')];
+  assert.match(cards[0].querySelector('.title').textContent, /^新/);
+  assert.equal(cards[1].querySelector('.bili-prophecy-new'), null);
+  assert.deepEqual(cards.map(card => card.dataset.biliSign), ['unknown', 'unknown']);
+  const net = summaryOf(app);
+  assert.equal(net.value, '—');
+  assert.equal(net.sign, 'unknown');
+  assert.match(net.note, /不按 0 计算/);
+});
+
+test('current board badges the first card and sums only signed settled results', async t => {
+  const app = await showBoard(t, `<div class="user-detail-content"><div class="content mb20"><span class="title">预言</span></div>${[
+    currentCard({ question: '正在进行', ticket: '10', countdown: '03:20' }),
+    currentCard({ question: '猜对了', net: '+4' }),
+    currentCard({ question: '猜错了', net: '-1' }),
+    currentCard({ question: '等结果', status: '等待结算', potential: '12' }),
+  ].join('')}</div>`);
+  const cards = [...app.window.document.querySelectorAll('.content-prohets-box')];
+  assert.equal(cards[0].querySelector('.bili-prophecy-new').textContent, '新');
+  assert.equal(cards.filter(card => card.querySelector('.bili-prophecy-new')).length, 1);
+  assert.equal(cards[1].querySelector('.bili-prophecy-settled-net').classList.contains('is-plus'), true);
+  assert.equal(cards[2].querySelector('.bili-prophecy-settled-net').classList.contains('is-minus'), true);
+  assert.equal(cards[3].querySelector('.bili-prophecy-settled-net'), null);
+  const net = summaryOf(app);
+  assert.equal(net.kicker, '已结算净收益');
+  assert.equal(net.value, '+3 硬币');
+  assert.equal(net.sign, 'plus');
+  assert.doesNotMatch(net.value, /10|12/);
+  assert.match(net.note, /另有 2 场未结算/);
+});
+
+test('a settled current board without timestamps badges the first card and can net to zero', async t => {
+  const app = await showBoard(t, `<div class="user-detail-content">${[
+    currentCard({ question: '后出现的结算', net: '+2' }),
+    currentCard({ question: '更早的进行中', ticket: '1', countdown: '00:05' }),
+    currentCard({ question: '另一场', net: '-2' }),
+  ].join('')}</div>`);
+  assert.match(app.window.document.querySelector('.bili-prophecy-latest .title').textContent, /后出现的结算/);
+  assert.equal(summaryOf(app).value, '0 硬币');
+  assert.equal(summaryOf(app).sign, 'zero');
+  assert.match(summaryOf(app).note, /另有 1 场未结算/);
+});
+
+test('annotation stays single after repeat mutations and disappears when the cards do', async t => {
+  const app = await showBoard(t, `<div class="content" data-v-00192e7f>${[
+    historyCard({ question: '会变化', status: '2026-06-01 00:00:00', coins: '+5' }),
+    historyCard({ question: '固定', status: '2026-05-01 00:00:00', coins: '-2' }),
+  ].join('')}</div>`, '#/history');
+  assert.equal(summaryOf(app).value, '+3 硬币');
+  app.window.document.body.append(app.window.document.createElement('i'));
+  await flush();
+  assert.equal(app.window.document.querySelectorAll('.bili-prophecy-new').length, 1);
+  assert.equal(app.window.document.querySelectorAll('.bili-prophecy-summary').length, 1);
+  app.window.document.querySelector('.text-content:last-child').textContent = '+8';
+  await flush();
+  assert.equal(summaryOf(app).value, '+6 硬币');
+  app.window.document.getElementById('app').innerHTML = '<div class="user-detail-content"></div>';
+  await flush();
+  assert.equal(app.window.document.querySelector('.bili-prophecy-summary'), null);
+  assert.equal(app.window.document.querySelector('.bili-prophecy-new'), null);
+});

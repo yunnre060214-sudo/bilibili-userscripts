@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         B站直播预言
 // @namespace    https://space.bilibili.com/1937432404
-// @version      1.0.0
-// @description  在弹幕输入框上方添加简约预言图标，独立打开官方预言与参与历史，适配桌面交互。
+// @version      1.1.0
+// @description  在弹幕输入框上方添加简约预言图标，独立打开官方预言与参与历史；新标签页标出最新预言，并显示硬币净收益。
 // @author       素晴
 // @homepageURL  https://github.com/yunnre060214-sudo/bilibili-userscripts
 // @supportURL   https://github.com/yunnre060214-sudo/bilibili-userscripts/issues
@@ -17,7 +17,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.0.0';
+  const VERSION = '1.1.0';
 
   // The official H5 can read account data on desktop, but showConfirm/showToast
   // invoke an App bridge without a WEB/PC_ROOM fallback. Adapt only the UI SDK;
@@ -152,7 +152,7 @@
     }
 
     function syncWorkspace() {
-      if (!observing) return;
+      if (!observing || !page.location) return;
       if (shadow && !shadow.host.isConnected) { cancelPending?.(); ensureRoot(); }
       const route = page.location.hash.slice(1) || '/';
       const supported = route === '/' || route === '/history';
@@ -160,6 +160,7 @@
       if (!doc.body || !supported || !content) {
         if (workspace) workspace.host.hidden = true;
         doc.documentElement?.removeAttribute('data-bili-prophecy-workspace');
+        annotatePredictions();
         return;
       }
       if (!workspace?.host.isConnected) {
@@ -209,6 +210,197 @@
         else link.removeAttribute('aria-current');
       }
       workspace.refresh.disabled = Boolean(cancelPending);
+      annotatePredictions();
+    }
+
+    // History already prints the server coin delta as “硬币：”. That value is
+    // smh_num_change: positive income, negative loss, 0, or -- when the round
+    // is unsettled or the user did not join. The current board only prints a
+    // signed result after settlement. Neither number is recalculated here.
+    function parseCoinChange(text, allowBareZero) {
+      const raw = String(text ?? '').trim();
+      const signed = raw.match(/^([+-])(\d+)$/);
+      if (signed) {
+        const value = Number(signed[1] + signed[2]);
+        return Number.isSafeInteger(value) ? { kind: 'value', value } : { kind: 'missing' };
+      }
+      if (allowBareZero && raw === '0') return { kind: 'value', value: 0 };
+      return { kind: 'missing' };
+    }
+
+    function formatCoins(total) {
+      const digits = String(Math.abs(total)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+      if (total > 0) return `+${digits} 硬币`;
+      if (total < 0) return `-${digits} 硬币`;
+      return `${digits} 硬币`;
+    }
+
+    function publishedAt(status) {
+      const match = String(status || '').trim().match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/);
+      if (!match) return null;
+      const parts = match.slice(1).map(Number);
+      const [year, month, day, hour, minute, second] = parts;
+      if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59) return null;
+      const time = Date.UTC(year, month - 1, day, hour, minute, second);
+      const check = new Date(time);
+      if (check.getUTCFullYear() !== year || check.getUTCMonth() !== month - 1 || check.getUTCDate() !== day) return null;
+      return time;
+    }
+
+    function cardStatus(card) {
+      const fromHistory = card.querySelector(':scope .title-line > .sub')?.textContent?.trim();
+      if (fromHistory) return fromHistory;
+      const fromCurrent = [...card.querySelectorAll(':scope .text-line > .line > .count')]
+        .map(node => node.textContent.trim())
+        .find(text => text && text !== '截止');
+      return fromCurrent || '';
+    }
+
+    function isOpenPrediction(card) {
+      const status = cardStatus(card);
+      return Boolean(card.querySelector(':scope .tick-block .count-time'))
+        || status === '进行中' || status === '等待结算' || status === '未开始';
+    }
+
+    // Current rounds have no publish time, so the official list order is the
+    // only signal and its client keeps newly seen rounds at the front.
+    // History uses publish time. An open record is newer only when the list
+    // already placed it before every dated record.
+    function latestPrediction(cards) {
+      const rows = cards.map((card, index) => ({ card, index, time: publishedAt(cardStatus(card)), open: isOpenPrediction(card) }));
+      const dated = rows.filter(row => row.time !== null);
+      if (!dated.length) return cards[0];
+      const leadingOpen = rows.find(row => row.open && row.index < dated[0].index);
+      if (leadingOpen) return leadingOpen.card;
+      dated.sort((a, b) => (b.time - a.time) || (a.index - b.index));
+      return dated[0].card;
+    }
+
+    function historyCoin(card) {
+      return parseCoinChange(card.querySelector(':scope .line.mt10 > .text-content:last-child')?.textContent, true);
+    }
+
+    function settledCoin(card) {
+      const span = [...card.querySelectorAll(':scope .text-line span')]
+        .find(node => /^[+-]\d+$/.test(node.textContent.trim()) && !node.closest('.tick-block'));
+      return { span, change: span ? parseCoinChange(span.textContent, false) : { kind: 'missing' } };
+    }
+
+    function writeText(node, text) {
+      if (node && node.textContent !== text) node.textContent = text;
+    }
+
+    function predictionCards() {
+      const current = [...doc.querySelectorAll('.user-detail-content > .content-prohets-box')];
+      if (current.length) return { mode: 'current', cards: current };
+      const history = [...doc.querySelectorAll('.content[data-v-00192e7f] > .item-content')];
+      if (history.length) return { mode: 'history', cards: history };
+      return { mode: '', cards: [] };
+    }
+
+    function clearPredictionAnnotations() {
+      doc.querySelectorAll('.bili-prophecy-summary, .bili-prophecy-new').forEach(node => node.remove());
+      doc.querySelectorAll('.bili-prophecy-latest').forEach(node => node.classList.remove('bili-prophecy-latest'));
+      doc.querySelectorAll('.bili-prophecy-settled-net').forEach(node => {
+        node.classList.remove('bili-prophecy-settled-net', 'is-plus', 'is-minus', 'is-zero');
+      });
+    }
+
+    function markLatest(cards) {
+      const newest = latestPrediction(cards);
+      for (const card of cards) {
+        const title = card.querySelector(':scope .title');
+        let badge = card.querySelector(':scope .bili-prophecy-new');
+        if (card === newest && title) {
+          if (!badge) {
+            badge = doc.createElement('span');
+            badge.className = 'bili-prophecy-new';
+            badge.dataset.biliProphecyExtra = 'new';
+            badge.title = '最新一条预言';
+            badge.textContent = '新';
+            title.insertBefore(badge, title.firstChild);
+          }
+          card.classList.add('bili-prophecy-latest');
+        } else {
+          badge?.remove();
+          card.classList.remove('bili-prophecy-latest');
+        }
+      }
+    }
+
+    function markCoinChange(mode, cards) {
+      const changes = [];
+      for (const card of cards) {
+        if (mode === 'history') {
+          const change = historyCoin(card);
+          const sign = change.kind === 'missing' ? 'unknown' : change.value > 0 ? 'plus' : change.value < 0 ? 'minus' : 'zero';
+          if (card.dataset.biliSign !== sign) card.dataset.biliSign = sign;
+          const label = card.querySelector(':scope .line.mt10 > .sub.ml20');
+          if (label && label.getAttribute('aria-label') !== '净收益') label.setAttribute('aria-label', '净收益');
+          changes.push(change);
+          continue;
+        }
+        const { span, change } = settledCoin(card);
+        for (const node of card.querySelectorAll('.bili-prophecy-settled-net')) {
+          if (node !== span) node.classList.remove('bili-prophecy-settled-net', 'is-plus', 'is-minus', 'is-zero');
+        }
+        if (span && change.kind === 'value') {
+          span.classList.add('bili-prophecy-settled-net');
+          span.classList.toggle('is-plus', change.value > 0);
+          span.classList.toggle('is-minus', change.value < 0);
+          span.classList.toggle('is-zero', change.value === 0);
+        }
+        changes.push(change);
+      }
+      return changes;
+    }
+
+    function renderNetSummary(cards, mode, changes) {
+      const host = cards[0].parentElement;
+      let summary = host.querySelector(':scope > .bili-prophecy-summary');
+      if (!summary) {
+        summary = doc.createElement('section');
+        summary.className = 'bili-prophecy-summary';
+        summary.setAttribute('aria-label', '净收益');
+        summary.dataset.biliProphecyExtra = 'summary';
+        summary.innerHTML = '<div class="bili-prophecy-summary-main"><span class="bili-prophecy-summary-kicker"></span><strong class="bili-prophecy-summary-value"></strong></div><p class="bili-prophecy-summary-note"></p>';
+        host.insertBefore(summary, cards[0]);
+      } else if (summary.nextElementSibling !== cards[0]) host.insertBefore(summary, cards[0]);
+      const known = changes.filter(item => item.kind === 'value');
+      const missing = changes.length - known.length;
+      const kicker = mode === 'history' ? '参与记录净收益' : '已结算净收益';
+      let sign = 'unknown';
+      let valueText = '—';
+      let note = mode === 'history'
+        ? '还没有可计入的硬币变化。未结算或未参与显示为 --，不按 0 计算。'
+        : '还没有已结算结果。进行中的预计奖励不计入。';
+      if (known.length) {
+        const total = known.reduce((sum, item) => sum + item.value, 0);
+        if (!Number.isSafeInteger(total)) {
+          valueText = '无法合计';
+          note = '硬币变化超出可精确合计的范围，没有显示不可靠的总数。';
+        } else {
+          sign = total > 0 ? 'plus' : total < 0 ? 'minus' : 'zero';
+          valueText = formatCoins(total);
+          note = missing
+            ? `${changes.length} 场中 ${known.length} 场已计入，另有 ${missing} 场未结算。`
+            : `${known.length} 场已全部计入。正数为净赚，负数为净亏。`;
+        }
+      }
+      writeText(summary.querySelector('.bili-prophecy-summary-kicker'), kicker);
+      writeText(summary.querySelector('.bili-prophecy-summary-value'), valueText);
+      writeText(summary.querySelector('.bili-prophecy-summary-note'), note);
+      if (summary.dataset.biliSign !== sign) summary.dataset.biliSign = sign;
+    }
+
+    function annotatePredictions() {
+      const { mode, cards } = predictionCards();
+      if (!mode) {
+        if (doc.querySelector('.bili-prophecy-summary, .bili-prophecy-new, .bili-prophecy-latest, .bili-prophecy-settled-net')) clearPredictionAnnotations();
+        return;
+      }
+      markLatest(cards);
+      renderNetSummary(cards, mode, markCoinChange(mode, cards));
     }
 
     function setDialogBusy() {
@@ -267,12 +459,29 @@
         html[data-bili-prophecy-desktop] .tip { opacity: .5; right: 4px; filter: grayscale(1) brightness(.6); }
         html[data-bili-prophecy-desktop] .mb20 { margin-bottom: 16px; }
         html[data-bili-prophecy-desktop] .content-prohets-box,
-        html[data-bili-prophecy-desktop] .item-content { height: auto; min-height: 0; border: 1px solid #e5e8ef; background: #fff; padding: 20px; margin-bottom: 16px; border-radius: 14px; box-shadow: 0 3px 12px #2a496506; }
+        html[data-bili-prophecy-desktop] .item-content { display: flex; flex-direction: column; height: auto; min-height: 0; border: 1px solid #e5e8ef; background: #fff; padding: 20px; margin-bottom: 16px; border-radius: 14px; box-shadow: 0 3px 12px #2a496506; }
         html[data-bili-prophecy-desktop] .content-prohets-box .title,
         html[data-bili-prophecy-desktop] .item-content .title { color: #273449; flex: 1; min-width: 0; font-size: 16px; line-height: 1.6; font-weight: 650; overflow-wrap: anywhere; }
-        html[data-bili-prophecy-desktop] .text-line { min-height: 0; height: auto; padding: 0 0 14px; gap: 12px; align-items: flex-start; }
+        html[data-bili-prophecy-desktop] .bili-prophecy-new { display: inline-flex; align-items: center; justify-content: center; height: 18px; margin-right: 8px; padding: 0 6px; border-radius: 999px; background: linear-gradient(115deg, #fb7299, #ff8aaf); color: #fff; font-size: 11px; font-weight: 700; line-height: 18px; vertical-align: 1px; }
+        html[data-bili-prophecy-desktop] .content-prohets-box.bili-prophecy-latest,
+        html[data-bili-prophecy-desktop] .item-content.bili-prophecy-latest { border-color: #f3b4c8; box-shadow: 0 8px 22px #fb72991a; }
+        html[data-bili-prophecy-desktop] .bili-prophecy-summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 0 0 16px; padding: 14px 16px; border: 1px solid #e5e8ef; border-radius: 14px; background: linear-gradient(115deg, #fff7fa, #f7f8fc 46%, #f3fbfe); }
+        html[data-bili-prophecy-desktop] .bili-prophecy-summary-kicker { display: block; color: #63758b; font-size: 12px; font-weight: 650; }
+        html[data-bili-prophecy-desktop] .bili-prophecy-summary-value { display: block; margin-top: 2px; color: #3e5166; font-size: 28px; line-height: 1.15; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+        html[data-bili-prophecy-desktop] .bili-prophecy-summary[data-bili-sign="plus"] .bili-prophecy-summary-value { color: #d23b73; }
+        html[data-bili-prophecy-desktop] .bili-prophecy-summary[data-bili-sign="minus"] .bili-prophecy-summary-value { color: #c0562a; }
+        html[data-bili-prophecy-desktop] .bili-prophecy-summary[data-bili-sign="zero"] .bili-prophecy-summary-value { color: #3e5166; }
+        html[data-bili-prophecy-desktop] .bili-prophecy-summary[data-bili-sign="unknown"] .bili-prophecy-summary-value { color: #8b99a8; }
+        html[data-bili-prophecy-desktop] .bili-prophecy-summary-note { margin: 0; max-width: 320px; color: #63758b; font-size: 12px; line-height: 1.65; text-align: right; }
+        html[data-bili-prophecy-desktop] .text-line { display: flex; min-height: 0; height: auto; flex-direction: column; align-items: stretch; padding: 0 0 14px; gap: 8px; }
         html[data-bili-prophecy-desktop] .text-line > .line,
-        html[data-bili-prophecy-desktop] .tick-block { flex-shrink: 0; margin-top: 3px; }
+        html[data-bili-prophecy-desktop] .tick-block { display: flex; flex-shrink: 0; flex-direction: row; align-items: center; align-self: flex-start; gap: 8px; margin-top: 0; }
+        html[data-bili-prophecy-desktop] .text-line > .line > .count { padding: 2px 8px; border-radius: 999px; background: #eef3f8; color: #3e5166; font-weight: 650; }
+        html[data-bili-prophecy-desktop] .text-line .bili-prophecy-settled-net { font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums; }
+        html[data-bili-prophecy-desktop] .text-line .bili-prophecy-settled-net::before { content: "净收益 "; color: #63758b; font-size: 12px; font-weight: 650; }
+        html[data-bili-prophecy-desktop] .text-line .bili-prophecy-settled-net.is-plus { color: #d23b73; }
+        html[data-bili-prophecy-desktop] .text-line .bili-prophecy-settled-net.is-minus { color: #c0562a; }
+        html[data-bili-prophecy-desktop] .text-line .bili-prophecy-settled-net.is-zero { color: #3e5166; }
         html[data-bili-prophecy-desktop] .tickey,
         html[data-bili-prophecy-desktop] .sub-info,
         html[data-bili-prophecy-desktop] .count { color: #63758b; font-size: 12px; }
@@ -290,7 +499,7 @@
         html[data-bili-prophecy-desktop] .bigbox:last-child .box.selected { border-color: #ee85aa; box-shadow: 0 2px 8px #ff66990c; }
         html[data-bili-prophecy-desktop] .box.unselected { opacity: 1; }
         html[data-bili-prophecy-desktop] .content-prohets-box > .line:has(.box.selected) .box.unselected { opacity: .72; }
-        html[data-bili-prophecy-desktop] .block { min-height: 66px; padding: 12px 26px; cursor: default; box-sizing: border-box; }
+        html[data-bili-prophecy-desktop] .block { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 72px; padding: 12px 18px; cursor: default; box-sizing: border-box; }
         html[data-bili-prophecy-desktop] .content-prohets-box:has(.tick-block .count-time):not(:has(.box.selected)) .block { cursor: pointer; }
         html[data-bili-prophecy-desktop] .content-prohets-box:has(.tick-block .count-time):not(:has(.box.selected)) .box:hover { box-shadow: 0 4px 12px #1d8db317; transform: translateY(-1px); }
         html[data-bili-prophecy-desktop] .box .icon { height: 22px; left: 7px; top: 7px; opacity: .7; }
@@ -312,25 +521,30 @@
         html[data-bili-prophecy-desktop] .user-game-footer .heart { width: 18px; opacity: .75; }
         html[data-bili-prophecy-desktop] .heart-num { color: #008dbe; font-size: 18px; line-height: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
         html[data-bili-prophecy-desktop] .h80 { height: 64px; flex-shrink: 0; }
-        html[data-bili-prophecy-desktop] .item-content .title-line { align-items: flex-start; gap: 10px; }
+        html[data-bili-prophecy-desktop] .item-content .title-line { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+        html[data-bili-prophecy-desktop] .item-content .title-line > .sub { flex-shrink: 0; margin-top: 3px; padding: 2px 8px; border-radius: 999px; background: #eef3f8; color: #3e5166; font-size: 12px; font-weight: 650; font-variant-numeric: tabular-nums; }
         html[data-bili-prophecy-desktop] .item-content .sub,
         html[data-bili-prophecy-desktop] .item-content .gary { color: #63758b; }
         html[data-bili-prophecy-desktop] .item-content .text-content,
-        html[data-bili-prophecy-desktop] .item-content .white { color: #516075; }
+        html[data-bili-prophecy-desktop] .item-content .white { color: #516075; overflow-wrap: anywhere; }
+        html[data-bili-prophecy-desktop] .item-content .line.mt10,
+        html[data-bili-prophecy-desktop] .item-content .line.mt8 { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 8px 12px; align-items: center; margin-top: 0; }
+        html[data-bili-prophecy-desktop] .item-content .line.mt10 { margin-top: 4px; padding-top: 12px; border-top: 1px solid #eef2f6; }
+        html[data-bili-prophecy-desktop] .item-content .line.mt10 > .ml20 { margin-left: 0; }
+        html[data-bili-prophecy-desktop] .item-content .line.mt10 > .sub.ml20 { font-size: 0; line-height: 0; }
+        html[data-bili-prophecy-desktop] .item-content .line.mt10 > .sub.ml20::before { content: "净收益"; display: inline-block; color: #63758b; font-size: 12px; line-height: 1.4; font-weight: 650; }
+        html[data-bili-prophecy-desktop] .item-content .line.mt10 > .text-content:last-child { font-size: 20px; font-weight: 700; font-variant-numeric: tabular-nums; }
+        html[data-bili-prophecy-desktop] .item-content[data-bili-sign="plus"] .line.mt10 > .text-content:last-child { color: #d23b73; }
+        html[data-bili-prophecy-desktop] .item-content[data-bili-sign="minus"] .line.mt10 > .text-content:last-child { color: #c0562a; }
+        html[data-bili-prophecy-desktop] .item-content[data-bili-sign="zero"] .line.mt10 > .text-content:last-child { color: #3e5166; }
+        html[data-bili-prophecy-desktop] .item-content[data-bili-sign="unknown"] .line.mt10 > .text-content:last-child { color: #8b99a8; }
         html[data-bili-prophecy-desktop] .header[data-v-00192e7f] .title { color: #526378; font-size: 13px; font-weight: 600; }
         html[data-bili-prophecy-desktop] .empty { margin-top: 54px; }
         html[data-bili-prophecy-desktop] .empty-content .sub { color: #8593a5; max-width: 270px; line-height: 1.8; }
         html[data-bili-prophecy-desktop] .loading p { color: #526378; }
-        @media (min-width: 560px) { html[data-bili-prophecy-desktop] .user-detail-content, html[data-bili-prophecy-desktop] .content[data-v-00192e7f] { max-width: 960px; margin: 0 auto; padding-top: 20px; } html[data-bili-prophecy-desktop] .user-game-footer { max-width: 960px; left: 50%; transform: translateX(-50%); border-radius: 16px 16px 0 0; } }
-        @media (min-width: 1000px) {
-          html[data-bili-prophecy-desktop] .user-detail-content,
-          html[data-bili-prophecy-desktop] .content[data-v-00192e7f] { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; align-items: start; }
-          html[data-bili-prophecy-desktop] .user-detail-content > :not(.content-prohets-box),
-          html[data-bili-prophecy-desktop] .content[data-v-00192e7f] > :not(.item-content) { grid-column: 1 / -1; }
-          html[data-bili-prophecy-desktop] .content-prohets-box,
-          html[data-bili-prophecy-desktop] .item-content { margin-bottom: 0; }
-        }
-        @media (max-width: 340px) { html[data-bili-prophecy-desktop] .content-prohets-box, html[data-bili-prophecy-desktop] .item-content { padding: 12px; } html[data-bili-prophecy-desktop] .text-line { gap: 8px; } html[data-bili-prophecy-desktop] .block { padding-left: 14px; padding-right: 14px; } }
+        @media (min-width: 560px) { html[data-bili-prophecy-desktop] .user-detail-content, html[data-bili-prophecy-desktop] .content[data-v-00192e7f] { max-width: 840px; margin: 0 auto; padding-top: 20px; } html[data-bili-prophecy-desktop] .user-game-footer { max-width: 840px; left: 50%; transform: translateX(-50%); border-radius: 16px 16px 0 0; } }
+        @media (max-width: 540px) { html[data-bili-prophecy-desktop] .bili-prophecy-summary { flex-direction: column; align-items: flex-start; } html[data-bili-prophecy-desktop] .bili-prophecy-summary-note { text-align: left; } html[data-bili-prophecy-desktop] .bili-prophecy-summary-value { font-size: 24px; } }
+        @media (max-width: 340px) { html[data-bili-prophecy-desktop] .content-prohets-box, html[data-bili-prophecy-desktop] .item-content { padding: 12px; } html[data-bili-prophecy-desktop] .text-line { gap: 8px; } html[data-bili-prophecy-desktop] .block { padding-left: 14px; padding-right: 14px; } html[data-bili-prophecy-desktop] .item-content .line.mt10, html[data-bili-prophecy-desktop] .item-content .line.mt8 { grid-template-columns: 64px minmax(0, 1fr); gap: 6px 8px; } }
         @media (prefers-reduced-motion: reduce) { html[data-bili-prophecy-desktop] .box { transition: none; } }
       `.replaceAll('html[data-bili-prophecy-desktop]', 'html[data-bili-prophecy-desktop]:has(.user-detail-content, .content[data-v-00192e7f])');
       (doc.head || doc.documentElement).append(style);

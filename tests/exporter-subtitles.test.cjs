@@ -309,7 +309,7 @@ test('fetch subtitle timeout is reported as a transport error, and credentials a
 
 function setupFullScript(t, {
   available = true, failPlayer = false, navigate = false,
-  subtitleTrack = track(), scriptCode = code,
+  subtitleTrack = track(), scriptCode = code, downloadMode = "browser",
 } = {}) {
   const { JSDOM } = require('jsdom');
   const dom = new JSDOM('<!doctype html><title>原视频</title><body><h1>原视频</h1></body>', {
@@ -319,11 +319,21 @@ function setupFullScript(t, {
   const { window } = dom;
   const blobs = new Map();
   const downloads = [];
+  const copies = [];
   const requests = [];
   // Tampermonkey @connect values are domains, not @match-style *.domain patterns.
   const connectDomains = Array.from(scriptCode.split('// ==/UserScript==')[0]
     .matchAll(/^\/\/ @connect\s+(\S+)/gm), match => match[1]);
   window.Blob = Blob;
+  window.GM_info = { scriptHandler: 'Tampermonkey', version: '5.5.0', downloadMode };
+  window.GM_setClipboard = (text, type, done) => { copies.push({ text, type }); queueMicrotask(done); };
+  window.GM_download = details => {
+    queueMicrotask(() => {
+      downloads.push({ name: details.name, blob: details.url });
+      details.onload();
+    });
+    return { abort() {} };
+  };
   window.URL.createObjectURL = blob => { const url = `blob:local/${blobs.size}`; blobs.set(url, blob); return url; };
   window.URL.revokeObjectURL = url => blobs.delete(url);
   window.HTMLAnchorElement.prototype.click = function () {
@@ -374,17 +384,23 @@ function setupFullScript(t, {
   window.document.body.append(action);
   window.eval(scriptCode);
 
-  return { window, downloads, requests, async clickExport() {
-    const downloadCount = downloads.length;
+  async function clickAction(id) {
     button.dispatchEvent(new window.Event('pointerdown', { bubbles: true, composed: true }));
     await new Promise(resolve => window.setTimeout(resolve, 5));
-    const item = options.querySelector('.bce-menu-export-item');
-    assert.ok(item, 'native menu must receive the export action');
+    const item = options.querySelector(`[data-bce-action="${id}"]`);
+    assert.ok(item, 'native menu must receive the requested action');
     item.click();
     const deadline = Date.now() + 1000;
-    while (downloads.length === downloadCount && Date.now() < deadline) await new Promise(resolve => window.setTimeout(resolve, 5));
-    assert.equal(downloads.length, downloadCount + 1, 'the complete script must initiate one Markdown download');
+    while (item.getAttribute('aria-busy') === 'true' && Date.now() < deadline) {
+      await new Promise(resolve => window.setTimeout(resolve, 5));
+    }
     assert.equal(item.getAttribute('aria-busy'), 'false');
+  }
+
+  return { window, downloads, requests, copies, clickAction, async clickExport() {
+    const downloadCount = downloads.length;
+    await clickAction('download-md');
+    assert.equal(downloads.length, downloadCount + 1, 'the complete script must initiate one Markdown download');
     return downloads.at(-1).blob.text();
   } };
 }
@@ -399,6 +415,33 @@ test('full script exports P2 subtitles above the floor after a native menu click
   assert.match(result, /根评论正文/);
   assert.match(result, /回复正文/);
   assert.match(setup.window.document.getElementById('bce-thread-exporter-toast').textContent, /含视频字幕/);
+});
+
+test('the native comment menu copies subtitles and replies without downloading', async t => {
+  const setup = setupFullScript(t);
+  await setup.clickAction('copy-md');
+  assert.equal(setup.copies.length, 1);
+  assert.equal(setup.copies[0].type, 'text');
+  assert.match(setup.copies[0].text, /原视频第二集字幕/);
+  assert.match(setup.copies[0].text, /根评论正文/);
+  assert.match(setup.copies[0].text, /回复正文/);
+  assert.equal(setup.downloads.length, 0);
+  assert.match(setup.window.document.getElementById('bce-thread-exporter-toast').textContent, /已复制到剪贴板/);
+});
+
+test('native download mode saves the prepared file only after clicking Save', async t => {
+  const setup = setupFullScript(t, { downloadMode: 'native' });
+  await setup.clickAction('download-md');
+  assert.equal(setup.downloads.length, 0);
+  const toast = setup.window.document.getElementById('bce-thread-exporter-toast');
+  assert.doesNotMatch(toast.textContent, /已导出/);
+  const save = [...toast.querySelectorAll('button')].find(button => button.textContent === '保存文件');
+  assert.ok(save);
+  save.click();
+  assert.equal(setup.downloads.length, 1);
+  assert.match(await setup.downloads[0].blob.text(), /原视频第二集字幕/);
+  assert.match(toast.textContent, /已向浏览器发出保存请求/);
+  assert.doesNotMatch(toast.textContent, /已导出/);
 });
 
 test('full script still downloads comments when the video has no subtitles', async t => {

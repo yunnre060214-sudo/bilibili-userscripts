@@ -2,11 +2,11 @@
 // @name         Bilibili Comment Thread Exporter
 // @name:zh-CN   B站评论楼层导出器
 // @namespace    https://space.bilibili.com/1937432404
-// @version      1.2.1
+// @version      1.3.0
 // @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/bilibili-comment-thread-exporter.user.js
 // @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/bilibili-comment-thread-exporter.user.js
 // @description  Download video subtitles and a complete Bilibili comment thread together as Markdown from the native three-dot menu.
-// @description:zh-CN 在 B 站评论三点菜单中下载 Markdown，在楼层上方附上当前分 P 的字幕正文，并保留精确回复关系。
+// @description:zh-CN 在 B 站评论三点菜单中下载或复制 Markdown，在楼层上方附上当前分 P 的字幕正文，并保留精确回复关系。
 // @author       素晴
 // @match        https://www.bilibili.com/video/*
 // @connect      api.bilibili.com
@@ -14,6 +14,7 @@
 // @connect      hdslb.com
 // @grant        GM_download
 // @grant        GM_info
+// @grant        GM_setClipboard
 // @grant        GM_xmlhttpRequest
 // @run-at       document-start
 // @noframes
@@ -28,7 +29,7 @@
 
   const META = Object.freeze({
     id: "bce-thread-exporter",
-    version: "1.2.1",
+    version: "1.3.0",
     installGuard: "__bceCommentExporterV1Installed",
   });
 
@@ -52,6 +53,9 @@
     childPreviewLimit: 12,
     breadcrumbMinDepth: 4,
     breadcrumbMaxSegments: 6,
+    clipboardMaxReplies: 200,
+    clipboardMaxBytes: 256 * 1024,
+    clipboardConfirmTimeoutMs: 10000,
   });
 
   const API = Object.freeze({
@@ -82,6 +86,12 @@
       label: "导出为 MD",
       title: "下载视频字幕与本楼 Markdown 文件",
       successText: "已导出 Markdown",
+    }),
+    Object.freeze({
+      id: "copy-md",
+      label: "复制到剪贴板",
+      title: "复制本楼与视频字幕的 Markdown，限 200 条回复及 256 KiB",
+      successText: "已复制到剪贴板",
     }),
   ]);
 
@@ -410,7 +420,7 @@
 
   async function runExport(context, action, sourceItem) {
     const task = beginExportTask();
-    let downloadWaitTimer = null;
+    const copying = action.id === "copy-md";
     if (sourceItem) runtime.export.itemTasks.set(sourceItem, task);
     setMenuItemBusy(sourceItem, true, action.label);
     showToast("正在获取完整楼层…");
@@ -419,9 +429,10 @@
       const exportContext = { ...context, source: context.source || captureVideoSource(context) };
       const thread = await fetchThread(exportContext, {
         task,
+        maxReplies: copying ? CONFIG.clipboardMaxReplies : undefined,
         progress: (current, total) => {
           const totalText = total > 0 ? ` / ${total}` : "";
-          const message = `正在导出 ${current}${totalText}`;
+          const message = `正在获取回复 ${current}${totalText}`;
 
           if (sourceItem?.isConnected && runtime.export.itemTasks.get(sourceItem) === task) {
             sourceItem.textContent = message;
@@ -437,30 +448,26 @@
       throwIfCancelled(task);
 
       const markdown = formatThreadMarkdown(thread);
-      downloadWaitTimer = window.setTimeout(() => {
-        if (task.cancelled || runtime.export.activeTask !== task) return;
-        setMenuItemBusy(sourceItem, false, action.label);
-        showToast("仍在等待浏览器确认下载；可再次点击导出以取消并重试", "warning");
-      }, DOWNLOAD_CONFIRM_TIMEOUT_MS);
-      const downloadResult = await deliverMarkdown(thread, markdown, task);
-      throwIfCancelled(task);
-
       const replyCountText = `${thread.exporter.actualReplyCount} 条回复`;
       const subtitleText = thread.subtitles.status === "ok"
         ? "，含视频字幕"
-        : "，字幕未附上，原因见文件";
+        : "，字幕未附上，原因见正文";
       const completeText = thread.exporter.truncated
         ? "，分页提前停止"
         : thread.exporter.countMismatch ? "，接口计数有差额" : "";
       const detailText = `${replyCountText}${subtitleText}${completeText}`;
-      if (downloadResult !== true) {
-        showToast(
-          `已尝试让浏览器下载：${detailText}。请查看下载栏；若没有文件，请点击“保存文件”`,
-          "warning",
-          downloadResult?.save
-        );
-        return;
+      if (copying) {
+        await copyMarkdown(markdown, task);
+      } else {
+        showToast("正在保存 Markdown…");
+        const result = await deliverMarkdown(thread, markdown, task);
+        throwIfCancelled(task);
+        if (result.save) {
+          showToast(`${result.message}。Markdown 已准备好（${detailText}），点击“保存文件”`, "warning", result.save);
+          return;
+        }
       }
+      throwIfCancelled(task);
 
       showToast(
         `${action.successText}：${detailText}`,
@@ -468,10 +475,9 @@
       );
     } catch (error) {
       if (!isCancelledError(error)) {
-        showToast(error?.message || String(error), "error");
+        showToast(error?.message || String(error), error?.name === "BceClipboardLimitError" ? "warning" : "error");
       }
     } finally {
-      if (downloadWaitTimer !== null) window.clearTimeout?.(downloadWaitTimer);
       finishExportTask(task);
       if (!sourceItem || runtime.export.itemTasks.get(sourceItem) === task) {
         if (sourceItem) runtime.export.itemTasks.delete(sourceItem);
@@ -573,6 +579,7 @@
   async function fetchThread(context, options = {}) {
     const task = options.task;
     const progress = options.progress;
+    const maxReplies = options.maxReplies ?? Infinity;
     const accumulator = createReplyAccumulator();
 
     let rootReply = null;
@@ -590,15 +597,21 @@
 
       const data = payload?.data || {};
       if (data.root) rootReply = data.root;
+      expectedReplyCount = readExpectedReplyCount(data, expectedReplyCount);
+      if (expectedReplyCount > maxReplies) {
+        throw new BceClipboardLimitError(`接口显示回复超过 ${maxReplies} 条`);
+      }
 
       const pageReplies = Array.isArray(data.replies) ? data.replies : [];
       const countBefore = accumulator.size;
 
       for (const reply of pageReplies) {
         accumulator.addTree(reply);
+        if (accumulator.size > maxReplies) {
+          throw new BceClipboardLimitError(`回复超过 ${maxReplies} 条`);
+        }
       }
 
-      expectedReplyCount = readExpectedReplyCount(data, expectedReplyCount);
       progress?.(accumulator.size, expectedReplyCount);
 
       const stopReason = getPaginationStopReason({
@@ -1873,6 +1886,13 @@
     }
   }
 
+  class BceClipboardLimitError extends Error {
+    constructor(reason) {
+      super(`未复制：${reason}，请使用“导出为 MD”。`);
+      this.name = "BceClipboardLimitError";
+    }
+  }
+
   class BceTransportError extends Error {
     constructor(message, retryable) {
       super(message);
@@ -1953,100 +1973,96 @@
 
   const DOWNLOAD_CONFIRM_TIMEOUT_MS = 60000;
   const BROWSER_DOWNLOAD_URL_TTL_MS = 120000;
-  const FALLBACK_DOWNLOAD_REASONS = new Set([
-    "not_enabled",
-    "not_whitelisted",
-    "not_permitted",
-    "not_supported",
-  ]);
 
-  function downloadText(fileName, text, type, task) {
+  async function downloadText(fileName, text, type, task) {
     const blob = new Blob([text], { type });
     const manager = typeof GM_info === "object" ? GM_info : null;
     const [major, minor] = String(manager?.version || "").split(".").map(Number);
-
+    // Native-mode callbacks do not give this script a browser download record.
     if (
       typeof GM_download === "function" &&
       manager?.scriptHandler === "Tampermonkey" &&
+      manager.downloadMode === "browser" &&
       (major > 5 || (major === 5 && minor >= 4))
     ) {
-      return new Promise((resolve, reject) => {
-        let settled = false;
-        let download;
-
-        function finish(error) {
-          if (settled) return;
-          settled = true;
-          clearTaskAbort(task, abortDownload);
-          if (error) reject(error);
-          else resolve(true);
-        }
-
-        function abortDownload() {
-          finish(new BceCancelledError());
-          try {
-            download?.abort?.();
-          } catch (_) {
-            // The task is already cancelled even if the manager cannot abort.
-          }
-        }
-
-        try {
-          download = GM_download({
-            url: blob,
-            name: fileName,
-            timeout: DOWNLOAD_CONFIRM_TIMEOUT_MS,
-            onload: () => finish(),
-            onerror: (error) => finish(createDownloadError(error)),
-            ontimeout: () => finish(new Error("下载超时，请重试")),
-          });
-          if (!settled) bindTaskAbort(task, abortDownload);
-        } catch (error) {
-          finish(new Error(`下载启动失败：${error?.message || String(error)}`));
-        }
-      }).catch((error) => {
-        if (isCancelledError(error) || !FALLBACK_DOWNLOAD_REASONS.has(error?.downloadReason)) {
-          throw error;
-        }
-        return downloadViaBrowserLink(fileName, blob);
-      });
+      try {
+        await downloadWithManager(fileName, blob, task);
+        return {};
+      } catch (error) {
+        throwIfCancelled(task);
+        return { message: error.message, save: () => saveBrowserFile(fileName, blob) };
+      }
     }
-
-    return Promise.resolve(downloadViaBrowserLink(fileName, blob));
+    return { message: "等待手动保存", save: () => saveBrowserFile(fileName, blob) };
   }
 
-  function downloadViaBrowserLink(fileName, blob) {
+  function downloadWithManager(fileName, blob, task) {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      let download;
+      const timer = window.setTimeout(timeoutDownload, DOWNLOAD_CONFIRM_TIMEOUT_MS);
+
+      function finish(error) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        clearTaskAbort(task, abortDownload);
+        if (error) reject(error);
+        else resolve();
+      }
+
+      function stopDownload(error) {
+        if (settled) return;
+        finish(error);
+        try {
+          download?.abort?.();
+        } catch (_) {
+          // The save result is already settled.
+        }
+      }
+
+      function abortDownload() {
+        stopDownload(new BceCancelledError());
+      }
+
+      function timeoutDownload() {
+        stopDownload(new Error("未收到下载完成回执"));
+      }
+
+      try {
+        download = GM_download({
+          url: blob,
+          name: fileName,
+          conflictAction: "uniquify",
+          timeout: DOWNLOAD_CONFIRM_TIMEOUT_MS,
+          onload: () => finish(),
+          onerror: (error) => finish(new Error(formatDownloadError(error))),
+          ontimeout: timeoutDownload,
+        });
+        if (!settled) bindTaskAbort(task, abortDownload);
+      } catch (_) {
+        finish(new Error("油猴未能启动下载"));
+      }
+    });
+  }
+
+  function saveBrowserFile(fileName, blob) {
+    // Only call from the Save button's click handler, within the user gesture.
     const url = URL.createObjectURL(blob);
-    const save = () => triggerBrowserDownload(url, fileName);
-    save();
-    window.setTimeout(() => URL.revokeObjectURL(url), BROWSER_DOWNLOAD_URL_TTL_MS);
-    return { ok: false, save };
-  }
-
-  function triggerBrowserDownload(url, fileName) {
     const link = document.createElement("a");
     link.href = url;
     link.download = fileName;
     document.body.appendChild(link);
-    link.click();
-    link.remove();
-  }
-
-  function readDownloadReason(info) {
-    if (typeof info === "string") return info;
-    if (typeof info?.error === "string") return info.error;
-    return "";
-  }
-
-  function createDownloadError(info) {
-    const reason = readDownloadReason(info);
-    const error = new Error(formatDownloadError(reason ? { error: reason } : info));
-    error.downloadReason = reason;
-    return error;
+    try {
+      link.click();
+    } finally {
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), BROWSER_DOWNLOAD_URL_TTL_MS);
+    }
   }
 
   function formatDownloadError(info) {
-    const reason = readDownloadReason(info) || info?.message || String(info || "未知错误");
+    const reason = typeof info === "string" ? info : info?.error;
     const messages = {
       not_enabled: "油猴下载功能未启用",
       not_whitelisted: ".md 扩展名未加入油猴下载白名单",
@@ -2054,7 +2070,51 @@
       not_supported: "当前油猴或浏览器不支持下载",
       not_succeeded: "浏览器未能启动或完成下载",
     };
-    return `下载失败：${messages[reason] || reason}`;
+    return messages[reason] || "自动下载未完成";
+  }
+
+  function copyMarkdown(markdown, task) {
+    if (new Blob([markdown]).size > CONFIG.clipboardMaxBytes) {
+      throw new BceClipboardLimitError(`Markdown 超过 ${CONFIG.clipboardMaxBytes / 1024} KiB`);
+    }
+    throwIfCancelled(task);
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = window.setTimeout(() => {
+        finish(new Error("未收到复制确认，请检查剪贴板或使用“导出为 MD”。"));
+      }, CONFIG.clipboardConfirmTimeoutMs);
+
+      function finish(error) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        clearTaskAbort(task, cancelCopy);
+        if (error) reject(error);
+        else resolve();
+      }
+
+      function cancelCopy() {
+        finish(new BceCancelledError());
+      }
+
+      function copyFailed() {
+        finish(new Error("无法写入剪贴板，请使用“导出为 MD”。"));
+      }
+
+      bindTaskAbort(task, cancelCopy);
+      if (settled) return;
+      try {
+        if (typeof GM_setClipboard === "function") {
+          GM_setClipboard(markdown, "text", () => finish());
+        } else if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+          navigator.clipboard.writeText(markdown).then(() => finish(), copyFailed);
+        } else {
+          copyFailed();
+        }
+      } catch (_) {
+        copyFailed();
+      }
+    });
   }
 
   function safeFileName(value) {
@@ -2069,6 +2129,7 @@
     if (!document.body) return;
 
     if (runtime.ui.toastTimer) clearTimeout(runtime.ui.toastTimer);
+    runtime.ui.toastTimer = 0;
     const toast = document.getElementById(`${META.id}-toast`) || document.createElement("div");
     toast.id = `${META.id}-toast`;
     toast.textContent = "";
@@ -2076,26 +2137,15 @@
     text.textContent = String(message || "");
     toast.appendChild(text);
     if (typeof save === "function") {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.textContent = "保存文件";
-      button.style.cssText = [
-        "margin-left:10px",
-        "pointer-events:auto",
-        "cursor:pointer",
-        "border:0",
-        "border-radius:4px",
-        "padding:4px 8px",
-        "background:#fff",
-        "color:#222",
-        "font:inherit",
-      ].join(";");
-      button.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        save();
+      appendToastButton(toast, "保存文件", () => {
+        try {
+          save();
+          text.textContent = "已向浏览器发出保存请求，请查看下载记录。";
+        } catch (_) {
+          text.textContent = "无法发起保存，请重试。";
+        }
       });
-      toast.appendChild(button);
+      appendToastButton(toast, "关闭", () => toast.remove());
     }
     toast.style.cssText = [
       "position:fixed",
@@ -2113,9 +2163,33 @@
     ].join(";");
 
     if (!toast.isConnected) document.body.appendChild(toast);
+    if (typeof save === "function") return;
     runtime.ui.toastTimer = window.setTimeout(() => {
       if (toast.isConnected) toast.remove();
     }, toastDuration(kind));
+  }
+
+  function appendToastButton(toast, label, action) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = label;
+    button.style.cssText = [
+      "margin-left:10px",
+      "pointer-events:auto",
+      "cursor:pointer",
+      "border:0",
+      "border-radius:4px",
+      "padding:4px 8px",
+      "background:#fff",
+      "color:#222",
+      "font:inherit",
+    ].join(";");
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      action();
+    });
+    toast.appendChild(button);
   }
 
   function toastDuration(kind) {

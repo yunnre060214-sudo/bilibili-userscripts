@@ -108,6 +108,7 @@ const assert = require('node:assert/strict');
       });
     });
 
+    await page.context().grantPermissions(['clipboard-read', 'clipboard-write'], { origin: 'https://www.bilibili.com' });
     await page.goto('https://www.bilibili.com/video/BV1234567890?p=2');
 
     // Privileged transport adapter: checks real metadata and GM callbacks.
@@ -189,10 +190,18 @@ const assert = require('node:assert/strict');
     await page.locator('bili-comment-menu .bce-menu-export-item').first().waitFor();
 
     const menuLabels = await page.locator('bili-comment-menu .bce-menu-export-item').allTextContents();
-    assert.deepEqual(menuLabels, ['导出为 MD']);
+    assert.deepEqual(menuLabels, ['导出为 MD', '复制到剪贴板']);
 
+    let downloadsStarted = 0;
+    page.on('download', () => downloadsStarted++);
+    const toast = page.locator('#bce-thread-exporter-toast');
+    const downloadItem = page.locator('bili-comment-menu [data-bce-action="download-md"]');
+    await downloadItem.click();
+    const saveButton = toast.getByRole('button', { name: '保存文件' });
+    await saveButton.waitFor();
+    assert.equal(downloadsStarted, 0, 'fallback waits for the user to click Save');
     const downloadPromise = page.waitForEvent('download');
-    await page.locator('bili-comment-menu .bce-menu-export-item').filter({ hasText: '导出为 MD' }).click();
+    await saveButton.click();
     const download = await downloadPromise;
     const suggestedName = download.suggestedFilename();
     const downloadedMarkdown = fs.readFileSync(await download.path(), 'utf8');
@@ -209,10 +218,19 @@ const assert = require('node:assert/strict');
     assert.ok(downloadedMarkdown.indexOf('## 视频字幕正文') < downloadedMarkdown.indexOf('## 评论楼层'));
     assert.doesNotMatch(downloadedMarkdown, /schema v/i);
 
+    await page.locator('bili-comment-menu [data-bce-action="copy-md"]').click();
+    await toast.getByText(/已复制到剪贴板/).waitFor();
+    const copiedMarkdown = await page.evaluate(() => navigator.clipboard.readText());
+    assert.match(copiedMarkdown, /第二集的字幕正文第一句。/);
+    assert.match(copiedMarkdown, /测试回复 5/);
+    assert.equal(downloadsStarted, 1);
+
     subtitleScenario = 'unavailable';
     await page.evaluate(() => { delete window.GM_xmlhttpRequest; });
+    await downloadItem.click();
+    await saveButton.waitFor();
     const noSubtitleDownload = page.waitForEvent('download');
-    await page.locator('bili-comment-menu .bce-menu-export-item').click();
+    await saveButton.click();
     const withoutSubtitles = fs.readFileSync(await (await noSubtitleDownload).path(), 'utf8');
     assert.match(withoutSubtitles, /未提供平台字幕轨道/);
     assert.match(withoutSubtitles, /这是一条测试根评论/);

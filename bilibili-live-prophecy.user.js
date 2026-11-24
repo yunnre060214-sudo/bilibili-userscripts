@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         B站直播预言
 // @namespace    https://space.bilibili.com/1937432404
-// @version      1.3.0
-// @description  在弹幕输入框上方添加简约预言图标，独立打开官方预言与参与历史；新标签页标出最新预言，并按今天和本机累计的历史显示硬币净收益。
+// @version      1.3.1
+// @description  在直播间弹幕工具区添加预言图标，独立打开官方预言与参与历史；新标签页标出最新预言，并按今天和本机累计的历史显示硬币净收益。
 // @author       素晴
 // @homepageURL  https://github.com/yunnre060214-sudo/bilibili-userscripts
 // @supportURL   https://github.com/yunnre060214-sudo/bilibili-userscripts/issues
@@ -19,7 +19,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '1.3.0';
+  const VERSION = '1.3.1';
 
   // The official H5 can read account data on desktop, but showConfirm/showToast
   // invoke an App bridge without a WEB/PC_ROOM fallback. Adapt only the UI SDK;
@@ -1098,7 +1098,7 @@
 
   function syncEntryTheme() {
     if (!ui?.host.isConnected) return;
-    let node = ui.mountPoint.closest('.chat-control-panel')?.querySelector('.chat-input-ctnr') || ui.mountPoint;
+    let node = ui.themeInput || ui.mountPoint;
     let dark = false;
     while (node) {
       const rgba = getComputedStyle(node).backgroundColor.match(/[\d.]+/g)?.map(Number);
@@ -1113,7 +1113,7 @@
 
   function watchEntryTheme() {
     if (!ui?.host.isConnected || document.hidden) return;
-    const input = ui.mountPoint.closest('.chat-control-panel')?.querySelector('.chat-input-ctnr') || null;
+    const input = ui.panel.querySelector('.chat-input-ctnr');
     if (themeObserver && ui.themeInput === input) return;
     themeObserver?.disconnect();
     themeObserver = new MutationObserver(syncEntryTheme);
@@ -1126,16 +1126,26 @@
 
   function placeRoot() {
     if (!active || document.hidden || !ui || !state) return;
-    if (ui.host.isConnected && ui.host.parentNode === ui.mountPoint) { watchEntryTheme(); return; }
-    const toolbar = document.querySelector('#chat-control-panel-vm .control-panel-icon-row, .chat-control-panel .control-panel-icon-row');
-    if (!toolbar) return;
-    themeObserver?.disconnect();
-    themeObserver = null;
-    const left = toolbar.querySelector(':scope > .icon-left-part');
-    ui.mountPoint = left || toolbar;
-    ui.host.dataset.placement = left ? 'left' : 'toolbar';
-    if (left) left.append(ui.host);
-    else toolbar.prepend(ui.host);
+    const panel = document.getElementById('chat-control-panel-vm') || document.querySelector('.chat-control-panel');
+    const right = panel?.querySelector('.chat-main-row > .icon-right-part');
+    const toolbar = right ? null : panel?.querySelector('.control-panel-icon-row');
+    const left = toolbar?.querySelector(':scope > .icon-left-part');
+    const mountPoint = right || left || toolbar;
+    if (mountPoint !== ui.mountPoint || panel !== ui.panel) {
+      themeObserver?.disconnect();
+      themeObserver = null;
+      ui.panel = panel;
+      ui.mountPoint = mountPoint;
+    }
+    if (!mountPoint) { ui.host.remove(); return; }
+
+    const placement = right ? 'right' : left ? 'left' : 'toolbar';
+    if (ui.host.dataset.placement !== placement) ui.host.dataset.placement = placement;
+    if (right || left) {
+      if (mountPoint.lastElementChild !== ui.host) mountPoint.append(ui.host);
+    } else if (mountPoint.firstElementChild !== ui.host) {
+      mountPoint.prepend(ui.host);
+    }
     watchEntryTheme();
   }
 
@@ -1144,11 +1154,13 @@
     host.id = ROOT_ID;
     const shadow = host.attachShadow({ mode: 'open' });
     shadow.innerHTML = `<style>
-      :host { all: initial; display: inline-flex; flex: 0 0 auto; align-self: center; vertical-align: middle; width: 28px; height: 28px; margin-left: 4px; color-scheme: light dark; --entry-ink: #61666d; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
+      :host { all: initial; --entry-size: 28px; display: inline-flex; flex: 0 0 auto; align-self: center; vertical-align: middle; width: var(--entry-size); height: var(--entry-size); margin-inline-start: 4px; color-scheme: light dark; --entry-ink: #61666d; font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; }
       :host([data-theme="dark"]) { --entry-ink: #b5bdc8; }
       :host([data-placement="toolbar"]) { float: left; }
+      :host([data-placement="right"]) { --entry-size: 24px; }
+      :host([data-placement="right"]) svg { width: 20px; height: 20px; }
       * { box-sizing: border-box; }
-      button { display: inline-flex; align-items: center; justify-content: center; width: 28px; height: 28px; padding: 3px; border: 0; border-radius: 6px; color: var(--entry-ink); background: transparent; font: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; transition: background .15s, color .15s, transform .15s; }
+      button { display: inline-flex; align-items: center; justify-content: center; width: var(--entry-size); height: var(--entry-size); padding: 0; border: 0; border-radius: 6px; color: var(--entry-ink); background: transparent; font: inherit; cursor: pointer; -webkit-tap-highlight-color: transparent; transition: background .15s, color .15s, transform .15s; }
       svg { display: block; flex-shrink: 0; }
       button:hover:not(:disabled) { background: linear-gradient(135deg, #fb72991a, #ae9cdb1a 48%, #00aeec1a); }
       button:active:not(:disabled) { transform: scale(.94); }
@@ -1159,7 +1171,7 @@
       @media (prefers-reduced-motion: reduce) { button { transition: none; } }
     </style><button type="button" data-action="open" aria-label="在独立窗口打开直播预言">${icon('spark', 22)}</button>`;
     const button = shadow.querySelector('button');
-    ui = { host, button, mountPoint: null };
+    ui = { host, button, panel: null, mountPoint: null, themeInput: null };
     button.addEventListener('pointerenter', syncEntryTheme);
     button.addEventListener('focus', syncEntryTheme);
     button.addEventListener('click', event => {
@@ -1282,7 +1294,11 @@
   function start() {
     active = true;
     if (!document.hidden && !observer) {
-      observer = new MutationObserver(placeRoot);
+      observer = new MutationObserver(records => {
+        const panel = ui?.panel;
+        if (!ui || (panel?.isConnected && !records.some(record => panel.contains(record.target)))) return;
+        placeRoot();
+      });
       observer.observe(document, { childList: true, subtree: true });
     }
     syncRoute();

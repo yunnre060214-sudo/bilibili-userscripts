@@ -436,14 +436,14 @@ function summaryOf(app) {
   return { summary, note: summary.querySelector('.bili-prophecy-summary-note').textContent, today: stat('today'), all: stat('all') };
 }
 
-test('prophecy 1.3.0 is the version declared to users', () => {
-  assert.equal(source.match(/^\/\/ @version\s+(\S+)/m)[1], '1.3.0');
-  assert.match(source, /const VERSION = '1\.3\.0'/);
+test('the install metadata and runtime declare the same prophecy version', () => {
+  const version = source.match(/^\/\/ @version\s+(\S+)/m)[1];
+  assert.equal(source.match(/const VERSION = '([^']+)'/)[1], version);
   assert.match(source, /@grant\s+GM_getValue/);
   assert.match(source, /@grant\s+GM_setValue/);
   const readme = fs.readFileSync(path.join(__dirname, '..', 'README.md'), 'utf8');
-  assert.match(readme, /^## B站直播预言 1\.3\.0$/m);
-  assert.match(readme, /安装 B站直播预言 1\.3\.0/);
+  assert.equal(readme.match(/^## B站直播预言 (\S+)$/m)[1], version);
+  assert.equal(readme.match(/\[安装 B站直播预言 ([^\]]+)\]/)[1], version);
 });
 
 test('history lays out the newest prediction and sums settled coin changes', async t => {

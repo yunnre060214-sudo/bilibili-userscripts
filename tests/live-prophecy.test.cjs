@@ -16,6 +16,14 @@ const controls = `<div id="chat-control-panel-vm" class="chat-control-panel">
     <div class="chat-input-ctnr"><textarea class="chat-input" placeholder="发个弹幕呗~">未发送内容</textarea><button class="send-btn">发送</button></div>
   </div>
 </div>`;
+const compactRow = `<div class="chat-main-row">
+  <div class="chat-input-ctnr p-relative">
+    <div class="danmaku-preference-btn"></div><div class="input-divider"></div>
+    <div class="chat-input-area"><textarea class="chat-input border-box" placeholder="发个弹幕呗~"></textarea></div>
+    <div class="emoticons-panel p-relative" title="表情包"></div><div class="send-btn-wrapper"></div>
+  </div>
+  <div class="icon-right-part"><div class="block-danmaku-btn"></div><div class="like-btn"></div></div>
+</div>`;
 
 async function flush() { await new Promise(resolve => setImmediate(resolve)); }
 
@@ -99,6 +107,51 @@ test('the standalone button follows the three native icons above the unchanged d
   assert.deepEqual(app.opened, [[expectedURL, '_blank', 'noopener,noreferrer']]);
   assert.equal(app.root().querySelector('iframe, .panel, [data-action="toggle"]'), null);
   assert.equal(doc.querySelectorAll('#bili-prophecy-root').length, 1);
+});
+
+test('the compact chat row places the entry after the native icons and opens the same official views', async t => {
+  const app = setup(t, { withControls: false });
+  const doc = app.window.document;
+  doc.body.innerHTML = `<div id="chat-control-panel-vm"><div id="control-panel-ctnr-box">${compactRow}</div></div>`;
+  doc.querySelector('textarea').value = '未发送内容';
+  const input = doc.querySelector('.chat-input-ctnr');
+  input.style.backgroundColor = '#1c1d1f';
+  await flush();
+  const group = doc.querySelector('.chat-main-row > .icon-right-part');
+  const host = doc.getElementById('bili-prophecy-root');
+  assert.deepEqual([...group.children].map(el => el.id || el.className), ['block-danmaku-btn', 'like-btn', host.id]);
+  assert.equal(host.dataset.placement, 'right');
+  assert.equal(host.dataset.theme, 'dark');
+  assert.equal(doc.querySelector('textarea').value, '未发送内容');
+  assert.notEqual(input.lastElementChild, host);
+  app.button().click();
+  app.button().dispatchEvent(new app.window.MouseEvent('click', { bubbles: true, shiftKey: true }));
+  assert.deepEqual(app.opened.map(([url]) => url), [expectedURL, `${expectedURL}history`]);
+});
+
+test('a chat panel can switch layouts and rebuild its native group without duplicating the entry', async t => {
+  const app = setup(t);
+  await flush();
+  const doc = app.window.document;
+  const host = doc.getElementById('bili-prophecy-root');
+  const panel = doc.getElementById('control-panel-ctnr-box');
+  panel.insertAdjacentHTML('beforeend', compactRow);
+  await flush();
+  assert.equal(host.parentNode, panel.querySelector('.chat-main-row > .icon-right-part'));
+  const newGroup = doc.createElement('div');
+  newGroup.className = 'icon-right-part';
+  host.parentNode.replaceWith(newGroup);
+  await flush();
+  assert.equal(host.parentNode, newGroup);
+  newGroup.insertAdjacentHTML('beforeend', '<div class="like-btn"></div>');
+  await flush();
+  assert.equal(newGroup.lastElementChild, host);
+  newGroup.parentNode.remove();
+  await flush();
+  assert.equal(host.parentNode, panel.querySelector('.icon-left-part'));
+  assert.equal(host.dataset.placement, 'left');
+  assert.equal(doc.querySelectorAll('#bili-prophecy-root').length, 1);
+  assert.equal(app.requests.length, 1);
 });
 
 test('a short room number opens the returned owner rather than treating the room number as a uid', async t => {

@@ -2,7 +2,7 @@
 // @name         Bilibili Comment Thread Exporter
 // @name:zh-CN   B站评论楼层导出器
 // @namespace    https://space.bilibili.com/1937432404
-// @version      1.3.1
+// @version      1.3.2
 // @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/bilibili-comment-thread-exporter.user.js
 // @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/bilibili-comment-thread-exporter.user.js
 // @description  Download video subtitles and a complete Bilibili comment thread together as Markdown from the native three-dot menu.
@@ -12,6 +12,7 @@
 // @connect      api.bilibili.com
 // @connect      bilibili.com
 // @connect      hdslb.com
+// @grant        GM_addElement
 // @grant        GM_download
 // @grant        GM_info
 // @grant        GM_setClipboard
@@ -29,7 +30,7 @@
 
   const META = Object.freeze({
     id: "bce-thread-exporter",
-    version: "1.3.1",
+    version: "1.3.2",
     installGuard: "__bceCommentExporterV1Installed",
   });
 
@@ -124,7 +125,10 @@
 
   function boot() {
     installCommentMenuIntegration();
-    onReady(cleanupLegacyUi);
+    onReady(() => {
+      cleanupLegacyUi();
+      document.documentElement?.setAttribute("data-bce-version", META.version);
+    });
   }
 
   function onReady(callback) {
@@ -152,10 +156,11 @@
   function installCommentMenuIntegration() {
     if (document[META.installGuard]) return;
     document[META.installGuard] = true;
-    document.addEventListener("pointerdown", handleCommentMenuPointerDown, true);
+    document.addEventListener("pointerdown", handleCommentMenuOpen, true);
+    document.addEventListener("click", handleCommentMenuOpen, true);
   }
 
-  function handleCommentMenuPointerDown(event) {
+  function handleCommentMenuOpen(event) {
     const path = getComposedPath(event);
     if (!findMoreButtonTrigger(path)) return;
 
@@ -163,11 +168,9 @@
     if (!actionRenderer) return;
 
     const baseContext = resolveCommentExportContext(actionRenderer, path);
-    if (!baseContext) return;
-
     const context = {
       ...baseContext,
-      source: captureVideoSource(baseContext),
+      source: captureVideoSource(baseContext || { oid: "" }),
       actionRenderer,
       menuHost: findBiliCommentMenuHost(path, actionRenderer),
       capturedAt: Date.now(),
@@ -305,7 +308,16 @@
     item.addEventListener("click", (event) => {
       event.preventDefault();
       stopNativeAction(event);
-      runExport(item.__bceContext, action, item);
+      const menuContext = item.__bceContext;
+      const comment = menuContext.oid ? menuContext : readPageCommentContext(menuContext.actionRenderer);
+      if (!comment) {
+        showToast("无法读取本楼编号。请刷新视频页后重试。", "error");
+        return;
+      }
+      runExport({
+        ...comment,
+        source: { ...menuContext.source, aid: comment.oid, type: comment.type },
+      }, action, item);
     });
   }
 
@@ -381,6 +393,8 @@
 
   function resolveCommentExportContext(actionRenderer, path = []) {
     const action = actionRenderer?.wrappedJSObject || actionRenderer;
+    const comments = path.find((element) => tagNameOf(element) === "bili-comments");
+    const [commentType, commentOid] = (comments?.getAttribute("data-params") || "").split(",");
     const renderers = [actionRenderer, ...path.filter((element) =>
       /^bili-comment-(?:reply-|thread-)?renderer$/.test(tagNameOf(element))
     )];
@@ -389,7 +403,7 @@
       if (!reply) continue;
 
       const pageRenderer = renderer.wrappedJSObject || renderer;
-      const oid = String(reply.oid_str || reply.oid || pageRenderer.oid || action?.oid || "");
+      const oid = String(reply.oid_str || reply.oid || pageRenderer.oid || action?.oid || commentOid || "");
       if (!oid) return null;
 
       const selectedReplyId = getReplyId(reply);
@@ -398,13 +412,84 @@
 
       return {
         oid,
-        type: normalizeCommentType(reply.type ?? pageRenderer.type ?? action?.type),
+        type: normalizeCommentType(reply.type ?? pageRenderer.type ?? action?.type ?? commentType),
         rootId,
         selectedReplyId,
         seedReply: reply,
       };
     }
     return null;
+  }
+
+  function readPageCommentContext(renderer) {
+    if (!renderer?.isConnected) return null;
+
+    // Only the data lookup runs in the page's JavaScript world. Requests and delivery stay in the userscript.
+    const requestEvent = "bce:read-comment-context";
+    const responseEvent = "bce:comment-context";
+    const source = `(() => {
+      const CONFIG = { commentType: ${CONFIG.commentType} };
+      ${tagNameOf}
+      ${getReplyId}
+      ${getReplyDataFromElement}
+      ${normalizeCommentType}
+      ${resolveCommentExportContext}
+      (${installPageCommentReader})(${JSON.stringify(requestEvent)}, ${JSON.stringify(responseEvent)});
+    })();`;
+    let context = null;
+    const receive = (event) => {
+      if (typeof event.detail !== "string") return;
+      try {
+        const comment = JSON.parse(event.detail);
+        if ([comment?.oid, comment?.rootId, comment?.selectedReplyId].every((id) => /^[1-9]\d*$/.test(id))) {
+          context = comment;
+        }
+      } catch {
+        // Ignore malformed messages from the page.
+      }
+    };
+
+    renderer.addEventListener(responseEvent, receive);
+    let script;
+    try {
+      const parent = document.head || document.documentElement;
+      if (typeof GM_addElement === "function") {
+        script = GM_addElement(parent, "script", { textContent: source });
+      }
+      if (!script) {
+        script = document.createElement("script");
+        script.textContent = source;
+        parent.appendChild(script);
+      }
+      renderer.dispatchEvent(new Event(requestEvent, { bubbles: true, composed: true }));
+    } catch {
+      // The menu remains usable for another attempt if the page blocks the lookup.
+    } finally {
+      script?.remove();
+      renderer.removeEventListener(responseEvent, receive);
+    }
+    return context;
+  }
+
+  function installPageCommentReader(requestEvent, responseEvent) {
+    const read = (event) => {
+      const path = event.composedPath();
+      const renderer = path[0];
+      if (tagNameOf(renderer) !== "bili-comment-action-buttons-renderer") return;
+      const context = resolveCommentExportContext(renderer, path);
+      if (!context) return;
+
+      const { seedReply } = context;
+      const { parent_str, parent, member, ctime, like, reply_control, rcount, count, content } = seedReply;
+      context.seedReply = {
+        rpid_str: context.selectedReplyId,
+        root_str: seedReply.root_str ?? seedReply.root ?? "0",
+        parent_str, parent, member, ctime, like, reply_control, rcount, count, content,
+      };
+      renderer.dispatchEvent(new CustomEvent(responseEvent, { detail: JSON.stringify(context) }));
+    };
+    document.addEventListener(requestEvent, read, { capture: true, once: true });
+    queueMicrotask(() => document.removeEventListener(requestEvent, read, true));
   }
 
   function normalizeCommentType(value) {

@@ -384,10 +384,14 @@ function setupFullScript(t, {
   window.document.body.append(action);
   window.eval(scriptCode);
 
-  async function clickAction(id) {
-    button.dispatchEvent(new window.Event('pointerdown', { bubbles: true, composed: true }));
+  async function openMenu(event = 'pointerdown') {
+    button.dispatchEvent(new window.Event(event, { bubbles: true, composed: true }));
     await new Promise(resolve => window.setTimeout(resolve, 5));
-    const item = options.querySelector(`[data-bce-action="${id}"]`);
+    return options;
+  }
+
+  async function clickAction(id) {
+    const item = (await openMenu()).querySelector(`[data-bce-action="${id}"]`);
     assert.ok(item, 'native menu must receive the requested action');
     item.click();
     const deadline = Date.now() + 1000;
@@ -397,7 +401,7 @@ function setupFullScript(t, {
     assert.equal(item.getAttribute('aria-busy'), 'false');
   }
 
-  return { window, downloads, requests, copies, clickAction, async clickExport() {
+  return { window, downloads, requests, copies, openMenu, clickAction, async clickExport() {
     const downloadCount = downloads.length;
     await clickAction('download-md');
     assert.equal(downloads.length, downloadCount + 1, 'the complete script must initiate one Markdown download');
@@ -438,6 +442,19 @@ test('current Bilibili component data restores both menu actions for a nested re
   for (const text of [markdown, setup.copies[0].text]) {
     assert.match(text, /导出入口：\[0002\]\(#msg-0002\) · rpid 2/);
   }
+});
+
+test('a menu opened by click still shows both actions when comment data is unavailable', async t => {
+  const setup = setupFullScript(t);
+  delete setup.window.document.querySelector('bili-comment-action-buttons-renderer').__data;
+
+  const options = await setup.openMenu('click');
+  const actions = [...options.querySelectorAll('[data-bce-action]')];
+  assert.deepEqual(actions.map(item => item.textContent), ['导出为 MD', '复制到剪贴板']);
+  actions[0].click();
+
+  assert.equal(setup.requests.length, 0);
+  assert.match(setup.window.document.getElementById('bce-thread-exporter-toast').textContent, /无法读取本楼编号/);
 });
 
 test('the native comment menu copies subtitles and replies without downloading', async t => {

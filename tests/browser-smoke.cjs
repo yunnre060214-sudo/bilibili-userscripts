@@ -28,7 +28,7 @@ const assert = require('node:assert/strict');
       oid_str: '123',
       type: 1,
       ctime: 1789787077,
-      like: Number(id),
+      like: id === '1' ? 67 : Number(id),
       member: { mid: id, uname: id === '1' ? '测试根用户' : `测试用户${id}` },
       content: { message: id === '1' ? '这是一条测试根评论' : `测试回复 ${id}` },
       reply_control: { location: id === '1' ? 'IP属地：重庆' : 'IP属地：广东' },
@@ -112,10 +112,22 @@ const assert = require('node:assert/strict');
     await page.goto('https://www.bilibili.com/video/BV1234567890?p=2');
 
     // Privileged transport adapter: checks real metadata and GM callbacks.
-    // This is still a fixture, not a real Tampermonkey sandbox or CORS test.
+    // Run the exporter in a Chromium world separate from the comment component's JavaScript.
+    const cdp = await page.context().newCDPSession(page);
+    const { frameTree } = await cdp.send('Page.getFrameTree');
+    const { executionContextId } = await cdp.send('Page.createIsolatedWorld', {
+      frameId: frameTree.frame.id, worldName: 'exporter-test',
+    });
+    async function evaluateExporter(expression) {
+      const { result, exceptionDetails } = await cdp.send('Runtime.evaluate', {
+        expression, contextId: executionContextId, returnByValue: true,
+      });
+      assert.equal(exceptionDetails, undefined);
+      return result.value;
+    }
     const exporterSource = fs.readFileSync(path.join(__dirname, '..', 'bilibili-comment-thread-exporter.user.js'), 'utf8');
     const connectDomains = Array.from(exporterSource.split('// ==/UserScript==')[0].matchAll(/^\/\/ @connect\s+(\S+)/gm), match => match[1]);
-    await page.evaluate(domains => {
+    const installTransport = domains => {
       window.GM_xmlhttpRequest = details => {
         const host = new URL(details.url).hostname;
         const controller = new AbortController();
@@ -128,7 +140,8 @@ const assert = require('node:assert/strict');
           .catch(error => error.name === 'AbortError' ? details.onabort?.() : details.onerror?.(error));
         return { abort() { controller.abort(); } };
       };
-    }, connectDomains);
+    };
+    await evaluateExporter(`(${installTransport})(${JSON.stringify(connectDomains)})`);
 
     await page.evaluate(() => {
       document.querySelectorAll('.quality-item').forEach(el => el.addEventListener('click', () => {
@@ -159,15 +172,13 @@ const assert = require('node:assert/strict');
 
       more.append(button, menu);
       actionRoot.appendChild(more);
-      action.__data = {
+      action.data = {
         rpid: 1,
         rpid_str: '1',
         root: 0,
         root_str: '0',
         parent: 0,
         parent_str: '0',
-        oid: 123,
-        oid_str: '123',
         type: 1,
         ctime: 1789787077,
         like: 67,
@@ -175,16 +186,24 @@ const assert = require('node:assert/strict');
         content: { message: '这是一条测试根评论' },
         reply_control: { location: 'IP属地：重庆' },
       };
-      document.querySelector('#comments').appendChild(action);
+      const comments = document.createElement('bili-comments');
+      comments.setAttribute('data-params', '1,123');
+      const comment = document.createElement('bili-comment-renderer');
+      comments.attachShadow({ mode: 'open' }).appendChild(comment);
+      comment.attachShadow({ mode: 'open' }).appendChild(action);
+      document.querySelector('#comments').appendChild(comments);
     });
 
     for (const file of [
       'biliforge',
       'biliecho',
-      'bilibili-comment-thread-exporter',
     ]) {
       await page.addScriptTag({ path: path.join(__dirname, '..', file + '.user.js') });
     }
+    assert.equal(await evaluateExporter(`document.querySelector('bili-comments').shadowRoot
+      .querySelector('bili-comment-renderer').shadowRoot
+      .querySelector('bili-comment-action-buttons-renderer').data`), undefined);
+    await evaluateExporter(exporterSource);
 
     await page.locator('bili-comment-action-buttons-renderer button').click();
     await page.locator('bili-comment-menu .bce-menu-export-item').first().waitFor();
@@ -226,7 +245,7 @@ const assert = require('node:assert/strict');
     assert.equal(downloadsStarted, 1);
 
     subtitleScenario = 'unavailable';
-    await page.evaluate(() => { delete window.GM_xmlhttpRequest; });
+    await evaluateExporter('delete window.GM_xmlhttpRequest');
     await downloadItem.click();
     await saveButton.waitFor();
     const noSubtitleDownload = page.waitForEvent('download');

@@ -417,6 +417,29 @@ test('full script exports P2 subtitles above the floor after a native menu click
   assert.match(setup.window.document.getElementById('bce-thread-exporter-toast').textContent, /含视频字幕/);
 });
 
+test('current Bilibili component data restores both menu actions for a nested reply', async t => {
+  const setup = setupFullScript(t);
+  const action = setup.window.document.querySelector('bili-comment-action-buttons-renderer');
+  const { oid_str: oid, ...root } = action.__data;
+  delete action.__data;
+  action.oid = oid;
+  action.data = { ...root, rpid_str: '2', root_str: '1', parent_str: '1' };
+
+  const markdown = await setup.clickExport();
+  await setup.clickAction('copy-md');
+  const requests = setup.requests.map(({ url }) => new URL(url))
+    .filter(url => url.pathname === '/x/v2/reply/reply');
+  assert.equal(requests.length, 2);
+  for (const { searchParams } of requests) {
+    assert.equal(searchParams.get('oid'), '123');
+    assert.equal(searchParams.get('root'), '1');
+  }
+  assert.equal(setup.copies.length, 1);
+  for (const text of [markdown, setup.copies[0].text]) {
+    assert.match(text, /导出入口：\[0002\]\(#msg-0002\) · rpid 2/);
+  }
+});
+
 test('the native comment menu copies subtitles and replies without downloading', async t => {
   const setup = setupFullScript(t);
   await setup.clickAction('copy-md');

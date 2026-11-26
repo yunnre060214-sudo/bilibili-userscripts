@@ -2,7 +2,7 @@
 // @name         Bilibili Comment Thread Exporter
 // @name:zh-CN   B站评论楼层导出器
 // @namespace    https://space.bilibili.com/1937432404
-// @version      1.3.0
+// @version      1.3.1
 // @updateURL    https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/bilibili-comment-thread-exporter.user.js
 // @downloadURL  https://raw.githubusercontent.com/yunnre060214-sudo/bilibili-userscripts/refs/heads/main/bilibili-comment-thread-exporter.user.js
 // @description  Download video subtitles and a complete Bilibili comment thread together as Markdown from the native three-dot menu.
@@ -29,7 +29,7 @@
 
   const META = Object.freeze({
     id: "bce-thread-exporter",
-    version: "1.3.0",
+    version: "1.3.1",
     installGuard: "__bceCommentExporterV1Installed",
   });
 
@@ -365,48 +365,46 @@
   // ---------------------------------------------------------------------------
 
   function getReplyDataFromElement(element) {
-    const data = element?.__data || element?.wrappedJSObject?.__data;
-    if (!data || typeof data !== "object") return null;
+    const pageElement = element?.wrappedJSObject || element;
+    // Current Bilibili components receive the reply in the Lit .data property.
+    for (const data of [pageElement?.data, element?.__data, pageElement?.__data]) {
+      if (!data || typeof data !== "object") continue;
 
-    const candidates = [
-      data.reply,
-      data.root,
-      data.comment,
-      data.data?.reply,
-      data.data?.root,
-      data.data,
-      data,
-    ];
-
-    return candidates.find((candidate) =>
-      candidate &&
-      typeof candidate === "object" &&
-      getReplyId(candidate)
-    ) || null;
+      const candidates = [data.reply, data.root, data.comment, data.data?.reply, data.data?.root, data.data, data];
+      const reply = candidates.find((candidate) =>
+        candidate && typeof candidate === "object" && getReplyId(candidate)
+      );
+      if (reply) return reply;
+    }
+    return null;
   }
 
   function resolveCommentExportContext(actionRenderer, path = []) {
-    const reply = getReplyDataFromElement(actionRenderer) || path
-      .filter((element) => /^bili-comment-(?:reply-|thread-)?renderer$/.test(tagNameOf(element)))
-      .map(getReplyDataFromElement).find(Boolean);
-    if (!reply) return null;
+    const action = actionRenderer?.wrappedJSObject || actionRenderer;
+    const renderers = [actionRenderer, ...path.filter((element) =>
+      /^bili-comment-(?:reply-|thread-)?renderer$/.test(tagNameOf(element))
+    )];
+    for (const renderer of renderers) {
+      const reply = getReplyDataFromElement(renderer);
+      if (!reply) continue;
 
-    const selectedReplyId = getReplyId(reply);
-    const oid = String(reply.oid_str || reply.oid || "");
-    if (!selectedReplyId || !oid) return null;
+      const pageRenderer = renderer.wrappedJSObject || renderer;
+      const oid = String(reply.oid_str || reply.oid || pageRenderer.oid || action?.oid || "");
+      if (!oid) return null;
 
-    const rootValue = reply.root_str ?? reply.root;
-    const rootId = !rootValue || String(rootValue) === "0"
-      ? selectedReplyId
-      : String(rootValue);
+      const selectedReplyId = getReplyId(reply);
+      const rootValue = reply.root_str ?? reply.root;
+      const rootId = !rootValue || String(rootValue) === "0" ? selectedReplyId : String(rootValue);
 
-    return {
-      oid,
-      type: normalizeCommentType(reply.type),
-      rootId,
-      selectedReplyId,
-      seedReply: reply,
-    };
+      return {
+        oid,
+        type: normalizeCommentType(reply.type ?? pageRenderer.type ?? action?.type),
+        rootId,
+        selectedReplyId,
+        seedReply: reply,
+      };
+    }
+    return null;
   }
 
   function normalizeCommentType(value) {
